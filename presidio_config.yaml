@@ -1,0 +1,42 @@
+# presidio_config.yaml
+imports: []
+
+# Кастомные детекторы для кода и БД.
+# Каждому распознавателю обязательно задаётся supported_entity, чтобы
+# Analyzer отдавал именно те сущности, которые маскирует LiteLLM/presidio.
+recognizers:
+  # 1. API Ключи и Токены (Generic API Keys / Bearer / JWT)
+  - name: "APIKeyRecognizer"
+    supported_language: "en"
+    supported_entity: "SECRET_KEY"
+    patterns:
+      - name: "Bearer Token"
+        regex: "Bearer\\s+[A-Za-z0-9\\-\\._~\\+\\/]+=*"
+        score: 0.9
+      - name: "Provider API Key"
+        regex: "(?i)\\b(sk-or-v1-[A-Za-z0-9_\\-]{16,}|gsk_[A-Za-z0-9_\\-]{16,}|sk-[A-Za-z0-9_\\-]{16,}|AIza[0-9A-Za-z_\\-]{35}|xai-[A-Za-z0-9_\\-]{16,})\\b"
+        score: 0.95
+      - name: "Generic Secret Key"
+        regex: "(?i)(api[_-]?key|secret|password|token|auth)\\s*[:=]\\s*['\"]?([A-Za-z0-9_\\-]{16,})['\"]?"
+        score: 0.85
+      - name: "Private Key Header"
+        regex: "-----BEGIN [A-Z ]+ PRIVATE KEY-----"
+        score: 1.0
+
+  # 2. Подключение к БД (Database Connection Strings)
+  - name: "DbConnectionStringRecognizer"
+    supported_language: "en"
+    supported_entity: "DB_CONNECTION"
+    patterns:
+      - name: "DB Connection URI"
+        regex: "(?i)(postgres|mysql|mariadb|mongodb\\+srv|mongodb|redis|oracle|mssql|sqlite):\\/\\/([^:]+):([^@]+)@([^:\\/]+):(\\d+)\\/([\\w\\-]+)"
+        score: 1.0
+
+  # 3. Приватные IPv4 и внутренние хосты
+  - name: "InternalNetworkRecognizer"
+    supported_language: "en"
+    supported_entity: "INTERNAL_IP"
+    patterns:
+      - name: "Private IPv4"
+        regex: "\\b(10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3})\\b"
+        score: 0.9

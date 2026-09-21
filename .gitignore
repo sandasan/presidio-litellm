@@ -1,0 +1,20 @@
+# Секреты
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Docker / временные файлы
+logs/
+*.log
+
+# Сгенерированные конфиги
+litellm-proxy/config.yaml
+litellm-proxy/config.json

@@ -1,0 +1,63 @@
+services:
+  presidio:
+    build: ./presidio-server
+    container_name: presidio-server
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./presidio_config.yaml:/app/presidio_config.yaml
+    environment:
+      - ANALYZER_CONF_FILE=/app/presidio_config.yaml
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm-proxy
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm-proxy:/app/litellm-proxy
+      - ./presidio_config.yaml:/app/presidio_config.yaml
+    environment:
+      - PYTHONPATH=/app/litellm-proxy
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENCODE_API_KEY=${OPENCODE_API_KEY}
+      - OPENCODE_API_BASE=${OPENCODE_API_BASE}
+      - PRESIDIO_ANALYZER_API_BASE=http://presidio:5001
+      - PRESIDIO_ANONYMIZER_API_BASE=http://presidio:5001
+      - MAX_OUTPUT_TOKENS=${MAX_OUTPUT_TOKENS:-8192}
+    depends_on:
+      presidio:
+        condition: service_healthy
+    restart: unless-stopped
+    # При старте контейнера опрашиваем провайдеров и генерируем config.yaml,
+    # затем запускаем сам LiteLLM-прокси с этим конфигом.
+    entrypoint: ["/bin/sh", "-c", "python /app/litellm-proxy/generate_config.py && exec litellm --config /app/litellm-proxy/config.yaml --port 4000"]
+    command: []
+
+  hermes-agent:
+    build:
+      context: ..
+      dockerfile: presidio-litellm/Dockerfile.hermes
+    container_name: hermes-agent
+    volumes:
+      # Монтируем ваши проекты, чтобы агент мог работать с вашими файлами
+      - /home/alexander/projects:/workspace
+    environment:
+      # Указываем агенту адрес LiteLLM внутри Docker-сети
+      - CUSTOM_BASE_URL=http://litellm:4000/v1
+      - CUSTOM_API_KEY=sk-dummy
+      - OPENAI_BASE_URL=http://litellm:4000/v1
+      - OPENAI_API_KEY=sk-dummy
+    working_dir: /workspace
+    depends_on:
+      - litellm
+    restart: unless-stopped

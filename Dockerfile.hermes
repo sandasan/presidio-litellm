@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    && rm -rf /var/lib/apt-get/lists/*
+
+# Создаем изолированный venv и прописываем его в PATH
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Устанавливаем Hermes Agent напрямую из PyPI
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir hermes-agent
+
+WORKDIR /workspace
+
+CMD ["tail", "-f", "/dev/null"]

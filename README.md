@@ -560,6 +560,79 @@ Use the sanitized route cloud-sanitized-auto via LiteLLM.
 Do not send raw secrets or PII to the upstream provider.
 ```
 
+## Короткая шпаргалка: запуск и проверка редакторной интеграции
+
+### 1) Поднять стек
+
+```bash
+cd /home/alexander/projects/presidio-litellm
+./update_models_and_run.sh
+```
+
+Проверка: `curl http://localhost:4000/health/liveliness` должен вернуть HTTP 200,
+`curl http://localhost:5001/health` — `{"status":"ok"}`.
+
+### 2) Continue
+
+Используйте этот набор настроек:
+
+```yaml
+models:
+  - name: Hermes via LiteLLM
+    provider: openai
+    model: cloud-sanitized-auto
+    apiBase: http://localhost:4000/v1
+    apiKey: sk-dummy
+    contextLength: 131072
+```
+
+Файл-образец уже есть в [.continue/config.yaml.example](.continue/config.yaml.example).
+
+### 3) Cline / Roo Code
+
+Базовый JSON-конфиг:
+
+```json
+{
+  "apiProvider": "openai",
+  "apiBaseUrl": "http://localhost:4000/v1",
+  "apiModelId": "cloud-sanitized-auto",
+  "apiKey": "sk-dummy"
+}
+```
+
+Для проекта уже подготовлены шаблоны:
+
+- [.clinerules](.clinerules)
+- [.roo/roomodes.json](.roo/roomodes.json)
+- [.roo/cline-config.json](.roo/cline-config.json)
+- [.roo/README.md](.roo/README.md)
+
+### 4) ACP / Hermes в VS Code
+
+```bash
+./hermes-acp.sh
+# или
+./.vscode/tasks.json -> Hermes ACP
+```
+
+Ожидаемое условие: `docker exec hermes-agent hermes acp --check` возвращает OK,
+а редактор подключается к ACP-серверу через тот же безопасный маршрут:
+`cloud-sanitized-auto` → LiteLLM → Presidio → OmniRoute.
+
+### 5) Проверка маршрута
+
+```bash
+curl http://localhost:4000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer sk-dummy' \
+  -d '{"model":"cloud-sanitized-auto","messages":[{"role":"user","content":"Мой email vasya@example.com, назови столицу Франции"}]}'
+```
+
+Важно: исходящий текст должен уходить в замаскированном виде, а ответ
+восстанавливаться локально. Это означает, что запросы к внешним провайдерам
+передаются через Presidio и только после маскирования PII.
+
 ## Полезные проверки
 
 ```bash

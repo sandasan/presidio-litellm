@@ -29,11 +29,10 @@ services:
       - MISTRAL_API_KEY=${MISTRAL_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
-      - OPENCODE_API_KEY=${OPENCODE_API_KEY}
-      - OPENCODE_API_BASE=${OPENCODE_API_BASE}
       - PRESIDIO_ANALYZER_API_BASE=http://presidio:5001
       - PRESIDIO_ANONYMIZER_API_BASE=http://presidio:5001
       - MAX_OUTPUT_TOKENS=${MAX_OUTPUT_TOKENS:-8192}
+      - LITELLM_LOG=${LITELLM_LOG:-INFO}
     depends_on:
       presidio:
         condition: service_healthy

@@ -597,11 +597,12 @@ models:
 - `.clinerules` — глобальные инструкции для Cline
 - `.roo/roomodes.json` — режим Roo Code с безопасной политикой
 - `.roo/cline-config.json` — конфиг API для Roo/Cline
+- `.roo/roo-code-settings.json` — готовый JSON для импорта настроек Roo Code
 - `.roo/README.md` — краткое пояснение для ручной настройки
 
 Минимальная настройка:
 
-- API provider: `openai`
+- API provider: `OpenAI` with a custom base URL
 - Base URL: `http://localhost:4000/v1`
 - Model: `cloud-sanitized-auto`
 - API key: `sk-dummy`
@@ -610,6 +611,12 @@ models:
 проектов. Для работы важна одна вещь: подключение идёт не напрямую к
 провайдеру, а через локальный LiteLLM-прокси, который уже применяет Presidio
 маскирование и делает де-анонимизацию ответа.
+
+Для Roo Code используйте файл
+[`.roo/roo-code-settings.json`](.roo/roo-code-settings.json) через действие
+импорта настроек, если оно доступно в установленной версии расширения. Если
+импорта JSON в интерфейсе нет, перенесите из файла те же значения в форму
+OpenAI-compatible provider вручную.
 
 Если расширение поддерживает `customInstructions` или `rules`, используйте
 текст:

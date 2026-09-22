@@ -1,0 +1,16 @@
+{
+  "providerProfiles": {
+    "currentApiConfigName": "Hermes via LiteLLM",
+    "apiConfigs": {
+      "Hermes via LiteLLM": {
+        "apiProvider": "openai",
+        "apiModelId": "cloud-sanitized-auto",
+        "openAiBaseUrl": "http://localhost:4000/v1",
+        "openAiApiKey": "sk-dummy"
+      }
+    }
+  },
+  "globalSettings": {
+    "customInstructions": "Use the sanitized route cloud-sanitized-auto via LiteLLM. Do not send raw secrets or PII to the upstream provider."
+  }
+}

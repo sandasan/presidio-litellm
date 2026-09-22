@@ -5,11 +5,6 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
 
-# Маршрут по умолчанию — через OmniRoute (`cloud-sanitized-auto`, алиас `auto`).
-# Классический shuffle между OpenRouter/Gemini/Groq/Mistral:
-#   MODEL=cloud-sanitized ./update_models_and_run.sh
-MODEL="${MODEL:-cloud-sanitized-auto}"
-
 cd "$PROJECT_DIR"
 
 echo "🔄 Образ omniroute (следим за latest)..."
@@ -62,8 +57,8 @@ fi
 curl -fsS -m 3 -o /dev/null http://127.0.0.1:20128/v1/models 2>/dev/null \
   && echo "✅ OmniRoute готов: дашборд http://127.0.0.1:20128"
 
-echo "🤖 Запуск Hermes Agent (модель $MODEL через LiteLLM + Presidio)..."
+echo "🤖 Запуск Hermes Agent (модель cloud-sanitized-auto через LiteLLM + Presidio)..."
 docker exec -it \
   -e CUSTOM_BASE_URL=http://litellm:4000/v1 \
   -e CUSTOM_API_KEY=sk-dummy \
-  hermes-agent hermes chat --provider custom -m "$MODEL"
+  hermes-agent hermes chat --provider custom -m cloud-sanitized-auto

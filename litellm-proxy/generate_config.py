@@ -1,80 +1,25 @@
 #!/usr/bin/env python3
-"""Опрос ИИ-провайдеров и генерация config.yaml для LiteLLM-прокси.
+"""Генерация config.yaml для LiteLLM-прокси.
 
-При старте контейнера litellm (или вручную) скрипт:
-  1. Опрашивает провайдеров, у которых заданы API-ключи: OpenRouter, Gemini,
-     Groq и Mistral (opencode/zen не используется — его free-модели доступны
-     только изнутри opencode).
-  2. Для каждого выбирает доступную БЕСПЛАТНУЮ модель с поддержкой tool-use
-     (агент Hermes вызывает инструменты).
-  3. Пишет итоговый конфиг в litellm-proxy/config.yaml — тот самый, который
-     загружает docker-compose.
+Маршрутизация сведена к ОДНОМУ статичному пути: LiteLLM -> OmniRoute ->
+провайдер. Опрос облачных провайдеров и прямой shuffle в LiteLLM убраны как
+избыточные — те же провайдеры и ключи уже подключены в OmniRoute (провижининг
+`provision_omniroute.sh`), а OmniRoute сам выбирает модель, агрегирует квоты и
+фолбэчится между free-тирами.
+
+Анонимизация при этом не страдает: callback `presidio` из `litellm_settings`
+применяется ко ВСЕМ исходящим запросам LiteLLM, в т.ч. к единственному
+маршруту к OmniRoute — PII маскируется до выхода из прокси.
 
 Скрипт использует только стандартную библиотеку, чтобы работать и на хосте,
 и внутри контейнера litellm без лишних зависимостей.
 """
 
-import json
 import os
-import urllib.parse
-import urllib.request
-from typing import Optional, Sequence
+from typing import Sequence
 
-MODEL_NAME = "cloud-sanitized"
 MODEL_NAME_AUTO = "cloud-sanitized-auto"
 OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
-
-# --- Предиктивные порядки выбора моделей ------------------------------------
-
-GEMINI_PREFERRED = [
-    "gemini-3.6-flash",
-    "gemini-flash-latest",
-    "gemini-3.5-flash",
-    "gemini-3.7-flash",
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite",
-    "gemini-2.5-flash-lite",
-]
-
-GROQ_PREFERRED = [
-    "qwen/qwen3.8-27b",
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
-    "meta-llama/llama-3.3-70b-versatile",
-    "groq/compound-mini",
-]
-
-MISTRAL_PREFERRED = [
-    "mistral-small-latest",
-    "mistral-small-2603",
-    "ministral-8b-latest",
-    "mistral-medium-latest",
-    "codestral-latest",
-]
-
-OPENROUTER_PREFERRED = [
-    "qwen/qwen3.8-27b:free",
-    "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
-    "z-ai/glm-5.2:free",
-    "nvidia/nemotron-3-ultra-550b-a55b:free",
-    "nvidia/nemotron-3.5-lightning:free",
-    "thinkingmachines/inkling:free",
-]
-
-# Слова, которых не должно быть в id выбранной модели (спец-модели)
-GEMINI_EXCLUDE = (
-    "image", "tts", "search", "grounding", "embedding", "prediction",
-    "audio", "video", "vision", "code", "thinking", "live", "draw",
-)
-GROQ_EXCLUDE = (
-    "whisper", "embedding", "orpheus", "prompt-guard", "compound", "safeguard",
-)
-MISTRAL_EXCLUDE = (
-    "embed", "fim", "voice", "audio", "vibe", "vision", "vlm",
-)
-
-TIMEOUT = 20  # сек на запрос
 
 # --- Утилиты ----------------------------------------------------------------
 
@@ -83,191 +28,15 @@ def log(msg: str) -> None:
     print(f"[generate-config] {msg}", flush=True)
 
 
-def http_json(url: str, headers: Optional[dict] = None, data: dict | None = None) -> dict | list:
-    body = json.dumps(data).encode() if data is not None else None
-    req_headers = {
-        "User-Agent": "presidio-litellm/1.0 (config-generator)",
-        "Accept": "application/json",
-    }
-    if headers:
-        req_headers.update(headers)
-    req = urllib.request.Request(url, data=body, headers=req_headers)
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return json.loads(resp.read().decode())
-
-
-def pick_preferred(ids: Sequence[str], preferred: Sequence[str]) -> Optional[str]:
-    for pref in preferred:
-        if pref in ids:
-            return pref
-    return None
-
-
-def pick_free(ids: Sequence[str], exclude: Sequence[str]) -> Optional[str]:
-    """Первая модель с префиксом :free и без спец-суффиксов."""
-    bad = set(exclude)
-    for mid in ids:
-        if mid.endswith(":free") and not any(part in mid for part in bad):
-            return mid
-    return None
-
-
-# --- Опросы провайдеров ------------------------------------------------------
-
-
-def probe_openrouter() -> Optional[dict]:
-    key = os.getenv("OPENROUTER_API_KEY", "").strip()
-    if not key:
-        log("OpenRouter: нет OPENROUTER_API_KEY, пропускаю")
-        return None
-    try:
-        data = http_json(
-            "https://openrouter.ai/api/v1/models",
-            headers={"Authorization": f"Bearer {key}"},
-        )
-        models = data.get("data", []) if isinstance(data, dict) else data
-        ids = [m.get("id", "") for m in models]
-
-        chosen = pick_preferred(ids, OPENROUTER_PREFERRED)
-        if chosen is None:
-            chosen = pick_free(ids, ("aqa", "audio", "embed"))
-        if chosen is None:
-            chosen = next(iter(ids), None)
-        if not chosen:
-            log("OpenRouter: список моделей пуст")
-            return None
-
-        log(f"OpenRouter: выбрана модель {chosen}")
-        return {
-            "model": f"openrouter/{chosen}",
-            "api_key": "os.environ/OPENROUTER_API_KEY",
-            "max_tokens": 4096,
-            "rpm": 15,
-        }
-    except Exception as e:
-        log(f"OpenRouter: ошибка опроса: {e}")
-        return None
-
-
-def probe_gemini() -> Optional[dict]:
-    key = os.getenv("GEMINI_API_KEY", "").strip()
-    if not key:
-        log("Gemini: нет GEMINI_API_KEY, пропускаю")
-        return None
-    try:
-        url = "https://generativelanguage.googleapis.com/v1beta/models?key=" + urllib.parse.quote(key)
-        data = http_json(url)
-        ids = [m.get("name", "").replace("models/", "", 1) for m in data.get("models", [])]
-
-        chosen = pick_preferred(ids, GEMINI_PREFERRED)
-        if chosen is None:
-            candidates = [i for i in ids if "flash" in i and not any(x in i for x in GEMINI_EXCLUDE)]
-            candidates.sort()
-            chosen = next(iter(candidates), None)
-        if not chosen:
-            log("Gemini: не нашёл flash-моделей")
-            return None
-
-        log(f"Gemini: выбрана модель {chosen}")
-        return {
-            "model": f"gemini/{chosen}",
-            "api_key": "os.environ/GEMINI_API_KEY",
-            "max_tokens": 4096,
-            "rpm": 10,
-        }
-    except Exception as e:
-        log(f"Gemini: ошибка опроса: {e}")
-        return None
-
-
-def probe_groq() -> Optional[dict]:
-    key = os.getenv("GROQ_API_KEY", "").strip()
-    if not key:
-        log("Groq: нет GROQ_API_KEY, пропускаю")
-        return None
-    try:
-        data = http_json(
-            "https://api.groq.com/openai/v1/models",
-            headers={"Authorization": f"Bearer {key}"},
-        )
-        ids = [m.get("id", "") for m in data.get("data", [])]
-
-        chosen = pick_preferred(ids, GROQ_PREFERRED)
-        if chosen is None:
-            candidates = [
-                i for i in ids
-                if not any(x in i.lower() for x in GROQ_EXCLUDE)
-                and "whisper" not in i.lower()
-            ]
-            # Не выбираем эмбеддинги/голос/аудио в качестве chat-модели
-            candidates = [i for i in candidates if any(k in i.lower() for k in ("qwen", "llama", "gpt-oss", "grok"))]
-            candidates.sort()
-            chosen = next(iter(candidates), None)
-        if not chosen:
-            log("Groq: нет подходящих chat-моделей")
-            return None
-
-        log(f"Groq: выбрана модель {chosen}")
-        return {
-            "model": f"groq/{chosen}",
-            "api_key": "os.environ/GROQ_API_KEY",
-            "max_tokens": 4096,
-            "rpm": 20,
-        }
-    except Exception as e:
-        log(f"Groq: ошибка опроса: {e}")
-        return None
-
-
-def probe_mistral() -> Optional[dict]:
-    key = os.getenv("MISTRAL_API_KEY", "").strip()
-    if not key:
-        log("Mistral: нет MISTRAL_API_KEY, пропускаю")
-        return None
-    try:
-        data = http_json(
-            "https://api.mistral.ai/v1/models",
-            headers={"Authorization": f"Bearer {key}"},
-        )
-        ids = [m.get("id", "") for m in data.get("data", [])]
-
-        chosen = pick_preferred(ids, MISTRAL_PREFERRED)
-        if chosen is None:
-            candidates = [i for i in ids if not any(x in i.lower() for x in MISTRAL_EXCLUDE)]
-            candidates.sort()
-            chosen = next(iter(candidates), None)
-        if not chosen:
-            log("Mistral: нет подходящих моделей")
-            return None
-
-        log(f"Mistral: выбрана модель {chosen}")
-        return {
-            "model": f"mistral/{chosen}",
-            "api_key": "os.environ/MISTRAL_API_KEY",
-            "max_tokens": 4096,
-            "rpm": 10,
-        }
-    except Exception as e:
-        log(f"Mistral: ошибка опроса: {e}")
-        return None
-
-
-def probe_zen() -> Optional[dict]:
-    """OpenAI-совместимый fallback (opencode zen). ОТКЛЮЧЁН: free-модели zen
-    доступны только изнутри opencode и возвращают 403 при вызове извне.
-    Оставляем заглушку, чтобы при желании включить платные каналы."""
-    return None
-
-
 def omniroute_route() -> dict:
-    """Статичный маршрут к OmniRoute (контейнер в том же docker-compose).
+    """Единственный маршрут: LiteLLM -> OmniRoute -> провайдер.
 
-    OmniRoute сам выбирает целевую модель (комбо `cloud-auto`, стратегия
-    auto): агрегирует квоты бесплатных моделей openrouter/gemini/groq/mistral,
-    уходит с исчерпавших лимит на живых и ретраит. Комбо создаётся скриптом
+    OmniRoute сам выбирает целевую модель (комбо `cloud-auto`, стратегия auto):
+    агрегирует квоты бесплатных моделей openrouter/gemini/groq/mistral, уходит с
+    исчерпавших лимит на живых и ретраит. Комбо создаётся скриптом
     provision_omniroute.sh при первом запуске стека.
-    Запросы приходят сюда уже деидентифицированными через Presidio (callback
-    в litellm_settings ниже), поэтому PII-защита сохраняется на всём пути.
+    Запросы приходят сюда уже деидентифицированными через Presidio (callback в
+    litellm_settings ниже), поэтому PII-защита сохраняется на всём пути.
 
     `model_info.max_input_tokens`: OmniRoute репортит для комбо 32 768 (контекст
     самой маленькой бесплатной модели), но Hermes-агенту нужен контекст >= 64K.
@@ -312,12 +81,12 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
         [
             emit_models(routes),
             "",
+            # Один маршрут к OmniRoute: полный fallback уже внутри OmniRoute,
+            # поэтому на стороне LiteLLM оставляем лишь скромный ретрай на 429
+            # (все бесплатные квоты одновременно пусты) — иначе вернём 429 клиенту.
             "router_settings:",
-            "  routing_strategy: simple-shuffle",
-            "  num_retries: 4",
+            "  num_retries: 2",
             "  cooldown_time: 60",
-            "  retry_policy:",
-            "    BadRequestErrorRetries: 1",
             "",
             "litellm_settings:",
             '  callbacks: ["presidio", "custom_callbacks.proxy_handler_instance"]',
@@ -327,28 +96,19 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
 
 
 def main() -> None:
-    probes = (probe_openrouter, probe_gemini, probe_groq, probe_mistral, probe_zen)
-    routes: list[tuple[str, dict]] = []
-    for probe in probes:
-        route = probe()
-        if route:
-            routes.append((MODEL_NAME, route))
-
-    if not any(name == MODEL_NAME for name, _ in routes):
-        log("ВНИМАНИЕ: ни один облачный провайдер не ответил —")
-        log(f"  в конфиге останется только маршрут {MODEL_NAME_AUTO} через omniroute.")
-
-    # Маршрут через OmniRoute добавляется всегда: контейнер в том же стеке,
-    # ключи не требуются (keyless auto-роутер на старте).
-    routes.append((MODEL_NAME_AUTO, omniroute_route()))
+    routes: list[tuple[str, dict]] = [(MODEL_NAME_AUTO, omniroute_route())]
 
     config_text = build_config(routes)
     with open(OUTPUT, "w") as f:
         f.write(config_text)
-    log(f"Записан конфиг {OUTPUT} с {len(routes)} маршрутами:")
+    log(f"Записан конфиг {OUTPUT} с {len(routes)} маршрутом:")
     for name, params in routes:
         log(f"  - {name} -> {params['model']}")
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 if __name__ == "__main__":

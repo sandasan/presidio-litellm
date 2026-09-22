@@ -35,8 +35,10 @@ services:
       # Passthrough API-ключ: тот же, что LiteLLM шлёт в Authorization.
       # Без него /v1/* отдаёт 401 клиенту (в т.ч. /v1/models).
       - OMNIROUTE_API_KEY=${OMNIROUTE_API_KEY:-sk-omniroute}
-      # Те же облачные ключи, что и у LiteLLM: OmniRoute понимает паттерн
-      # {PROVIDER_ID}_API_KEY и сам подключает провайдеров для роутинга `auto`.
+      # Облачные ключи провайдеров: OmniRoute понимает паттерн
+      # {PROVIDER_ID}_API_KEY и сам подключает провайдеров для роутинга `auto`
+      # (провижининг дополнительно регистрирует их в management API и создаёт
+      # комбо cloud-auto).
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - GROQ_API_KEY=${GROQ_API_KEY}
@@ -60,10 +62,9 @@ services:
       - ./presidio_config.yaml:/app/presidio_config.yaml
     environment:
       - PYTHONPATH=/app/litellm-proxy
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      # Облачные ключи LiteLLM больше НЕ нужны: единственный маршрут
+      # cloud-sanitized-auto идёт к OmniRoute, а провайдеры/ключи подключены
+      # там (env-паттерн {PROVIDER_ID}_API_KEY + провижининг).
       - OMNIROUTE_API_KEY=${OMNIROUTE_API_KEY:-sk-omniroute}
       - PRESIDIO_ANALYZER_API_BASE=http://presidio:5001
       - PRESIDIO_ANONYMIZER_API_BASE=http://presidio:5001
@@ -75,8 +76,8 @@ services:
       omniroute:
         condition: service_healthy
     restart: unless-stopped
-    # При старте контейнера опрашиваем провайдеров и генерируем config.yaml,
-    # затем запускаем сам LiteLLM-прокси с этим конфигом.
+    # При старте контейнера генерируем config.yaml (статичный маршрут к
+    # OmniRoute), затем запускаем сам LiteLLM-прокси с этим конфигом.
     entrypoint: ["/bin/sh", "-c", "python /app/litellm-proxy/generate_config.py && exec litellm --config /app/litellm-proxy/config.yaml --port 4000"]
     command: []
 

@@ -491,9 +491,9 @@ docker exec -it hermes-agent hermes-chat chat --provider custom -m cloud-sanitiz
 После этого Hermes работает как ассистент прямо в редакторе поверх того же
 анонимизированного маршрута.
 
-### 3. Копайлот-расширения на маршрут LiteLLM (не Hermes)
+### 3. Continue / Cline / Roo Code на маршрут LiteLLM (не Hermes)
 
-Любое OpenAI-совместимое расширение **Cline / Roo Code / Continue** можно
+Любое OpenAI-совместимое расширение **Continue / Cline / Roo Code** можно
 подключить напрямую к прокси:
 
 - Base URL: `http://localhost:4000/v1`
@@ -503,6 +503,32 @@ docker exec -it hermes-agent hermes-chat chat --provider custom -m cloud-sanitiz
 Подсказки и правки в редакторе пойдут через тот же стек (Presidio +
 де-анонимизация), но это **не** агент Hermes — агентского цикла, сессий и
 рабочих инструментов у этого варианта нет.
+
+#### Quick start для Continue
+
+1. Установите расширение Continue для VS Code.
+2. В корне проекта создайте файл `.continue/config.yaml` (можно взять пример
+   из `.continue/config.yaml.example`).
+3. Добавьте модель в OpenAI-совместимом формате:
+
+```yaml
+models:
+  - name: Hermes via LiteLLM
+    provider: openai
+    model: cloud-sanitized-auto
+    apiBase: http://localhost:4000/v1
+    apiKey: sk-dummy
+    contextLength: 131072
+```
+
+4. После сохранения выберите эту модель в Continue и проверьте, что запрос идёт
+   через `cloud-sanitized-auto`.
+
+Готовый пример лежит в файле [.continue/config.yaml.example](.continue/config.yaml.example).
+
+Если расширение запрашивает схему `apiBase` или `baseUrl`, используйте
+`http://localhost:4000/v1` и ключ `sk-dummy` — это тот же маршрут, что и в
+`hermes-agent`.
 
 ## Полезные проверки
 

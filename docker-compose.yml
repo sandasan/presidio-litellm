@@ -15,6 +15,41 @@ services:
       retries: 6
     restart: unless-stopped
 
+  omniroute:
+    image: diegosouzapw/omniroute:latest
+    container_name: omniroute
+    # Требуется больше времени для корректного завершения (сливает данные на диск)
+    stop_grace_period: 40s
+    ports:
+      # Дашборд и API: http://127.0.0.1:20128 (изнутри сети контейнеры ходят по http://omniroute:20128)
+      - "127.0.0.1:20128:20128"
+    volumes:
+      - omniroute-data:/app/data
+    environment:
+      # V8-куча Node.js (МБ). Агентные сценарии (Hermes, Claude Code, ...)
+      # с большой контекстом лучше поднять до 2048-4096.
+      - OMNIROUTE_MEMORY_MB=${OMNIROUTE_MEMORY_MB:-1024}
+      # Пароль админа дашборда (используется скриптом провижининга для
+      # подключения провайдеров из .env через management API).
+      - INITIAL_PASSWORD=${OMNIROUTE_INITIAL_PASSWORD:-omniro2026!}
+      # Passthrough API-ключ: тот же, что LiteLLM шлёт в Authorization.
+      # Без него /v1/* отдаёт 401 клиенту (в т.ч. /v1/models).
+      - OMNIROUTE_API_KEY=${OMNIROUTE_API_KEY:-sk-omniroute}
+      # Те же облачные ключи, что и у LiteLLM: OmniRoute понимает паттерн
+      # {PROVIDER_ID}_API_KEY и сам подключает провайдеров для роутинга `auto`.
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+    healthcheck:
+      # Публичный (без авторизации) эндпоинт здоровья gateway
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:20128/api/monitoring/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     container_name: litellm-proxy
@@ -29,12 +64,15 @@ services:
       - MISTRAL_API_KEY=${MISTRAL_API_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OMNIROUTE_API_KEY=${OMNIROUTE_API_KEY:-sk-omniroute}
       - PRESIDIO_ANALYZER_API_BASE=http://presidio:5001
       - PRESIDIO_ANONYMIZER_API_BASE=http://presidio:5001
       - MAX_OUTPUT_TOKENS=${MAX_OUTPUT_TOKENS:-8192}
       - LITELLM_LOG=${LITELLM_LOG:-INFO}
     depends_on:
       presidio:
+        condition: service_healthy
+      omniroute:
         condition: service_healthy
     restart: unless-stopped
     # При старте контейнера опрашиваем провайдеров и генерируем config.yaml,
@@ -50,6 +88,8 @@ services:
     volumes:
       # Монтируем ваши проекты, чтобы агент мог работать с вашими файлами
       - /home/alexander/projects:/workspace
+      # Стабильный конфиг Hermes (модель + aux-задачи через LiteLLM/Presidio)
+      - ./hermes_config.yaml:/root/.hermes/config.yaml
     environment:
       # Указываем агенту адрес LiteLLM внутри Docker-сети
       - CUSTOM_BASE_URL=http://litellm:4000/v1
@@ -60,3 +100,6 @@ services:
     depends_on:
       - litellm
     restart: unless-stopped
+
+volumes:
+  omniroute-data:

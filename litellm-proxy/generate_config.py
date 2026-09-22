@@ -21,6 +21,7 @@ import urllib.request
 from typing import Optional, Sequence
 
 MODEL_NAME = "cloud-sanitized"
+MODEL_NAME_AUTO = "cloud-sanitized-auto"
 OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
 
 # --- Предиктивные порядки выбора моделей ------------------------------------
@@ -258,13 +259,45 @@ def probe_zen() -> Optional[dict]:
     return None
 
 
+def omniroute_route() -> dict:
+    """Статичный маршрут к OmniRoute (контейнер в том же docker-compose).
+
+    OmniRoute сам выбирает целевую модель (комбо `cloud-auto`, стратегия
+    auto): агрегирует квоты бесплатных моделей openrouter/gemini/groq/mistral,
+    уходит с исчерпавших лимит на живых и ретраит. Комбо создаётся скриптом
+    provision_omniroute.sh при первом запуске стека.
+    Запросы приходят сюда уже деидентифицированными через Presidio (callback
+    в litellm_settings ниже), поэтому PII-защита сохраняется на всём пути.
+
+    `model_info.max_input_tokens`: OmniRoute репортит для комбо 32 768 (контекст
+    самой маленькой бесплатной модели), но Hermes-агенту нужен контекст >= 64K.
+    Реальный минимум ограничивается выбранной моделью, а OmniRoute при запросе
+    сам рулит выбором по fit (context-fit среди факторов). Здесь заявляем 128K,
+    чтобы Hermes принял модель; большие контексты OmniRoute уведёт на модели
+    с достаточным окном (gemini-flash и т.п.).
+    """
+    return {
+        "model": "openai/cloud-auto",
+        "api_base": "http://omniroute:20128/v1",
+        "api_key": "os.environ/OMNIROUTE_API_KEY",
+        "max_tokens": 4096,
+        "rpm": 30,
+        "model_info": {"max_input_tokens": 131072},
+    }
+
+
 # --- Генерация YAML ----------------------------------------------------------
 
 
-def emit_models(routes: Sequence[dict]) -> str:
+def emit_models(routes: Sequence[tuple[str, dict]]) -> str:
     lines = ["model_list:"]
-    for params in routes:
-        lines.append(f"  - model_name: {MODEL_NAME}")
+    for model_name, params in routes:
+        lines.append(f"  - model_name: {model_name}")
+        model_info = params.pop("model_info", None)
+        if model_info:
+            lines.append("    model_info:")
+            for k, v in model_info.items():
+                lines.append(f"      {k}: {v}")
         lines.append("    litellm_params:")
         for k, v in params.items():
             if isinstance(v, int):
@@ -274,7 +307,7 @@ def emit_models(routes: Sequence[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_config(routes: Sequence[dict]) -> str:
+def build_config(routes: Sequence[tuple[str, dict]]) -> str:
     return "\n".join(
         [
             emit_models(routes),
@@ -295,23 +328,26 @@ def build_config(routes: Sequence[dict]) -> str:
 
 def main() -> None:
     probes = (probe_openrouter, probe_gemini, probe_groq, probe_mistral, probe_zen)
-    routes = []
+    routes: list[tuple[str, dict]] = []
     for probe in probes:
         route = probe()
         if route:
-            routes.append(route)
+            routes.append((MODEL_NAME, route))
 
-    if not routes:
-        log("НЕ УДАЛОСЬ получить ни одной модели ни от одного провайдера.")
-        log("Старый config.yaml сохранён без изменений.")
-        return 1
+    if not any(name == MODEL_NAME for name, _ in routes):
+        log("ВНИМАНИЕ: ни один облачный провайдер не ответил —")
+        log(f"  в конфиге останется только маршрут {MODEL_NAME_AUTO} через omniroute.")
+
+    # Маршрут через OmniRoute добавляется всегда: контейнер в том же стеке,
+    # ключи не требуются (keyless auto-роутер на старте).
+    routes.append((MODEL_NAME_AUTO, omniroute_route()))
 
     config_text = build_config(routes)
     with open(OUTPUT, "w") as f:
         f.write(config_text)
     log(f"Записан конфиг {OUTPUT} с {len(routes)} маршрутами:")
-    for r in routes:
-        log(f"  - {r['model']}")
+    for name, params in routes:
+        log(f"  - {name} -> {params['model']}")
     return 0
 
 

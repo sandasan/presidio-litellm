@@ -1,0 +1,30 @@
+model: cloud-sanitized-auto
+auxiliary:
+  title_generation:
+    provider: custom
+    base_url: http://litellm:4000/v1
+    api_key: sk-dummy
+    model: cloud-sanitized-auto
+  compression:
+    provider: custom
+    base_url: http://litellm:4000/v1
+    api_key: sk-dummy
+    model: cloud-sanitized-auto
+  web_extract:
+    provider: custom
+    base_url: http://litellm:4000/v1
+    api_key: sk-dummy
+    model: cloud-sanitized-auto
+  skills_hub:
+    provider: custom
+    base_url: http://litellm:4000/v1
+    api_key: sk-dummy
+    model: cloud-sanitized-auto
+  approval:
+    provider: custom
+    base_url: http://litellm:4000/v1
+    api_key: sk-dummy
+    model: cloud-sanitized-auto
+onboarding:
+  seen:
+    busy_input_prompt: true

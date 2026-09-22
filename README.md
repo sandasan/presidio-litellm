@@ -120,8 +120,8 @@ Hermes / curl ──► LiteLLM (Presidio) ──► omniroute:20128 ──► �
   для маршрута `cloud-sanitized-auto` `max_input_tokens: 131072` (см.
   `generate_config.py`), а OmniRoute на запрос сам выбирает модель по
   вместимости контекста (context-fit).
-- Запросы LiteLLM → OmniRoute ходят уже деидентифицированными (вызывается callback
-  `presidio` из `litellm_settings`), поэтому PII до провайдеров не доходит.
+- Запросы LiteLLM → OmniRoute ходят уже деидентифицированными (гардрейл
+  `presidio` из секции `guardrails`), поэтому PII до провайдеров не доходит.
 - Ловим фолбэк и наоборот: OmniRoute умеет «выжимать» квоты бесплатных тиров
   и ретраить на другом провайдере, а если все квоты пусты — вернуть 429,
   который LiteLLM уже доретрает по тому же маршруту `cloud-sanitized-auto`.
@@ -142,8 +142,17 @@ curl http://localhost:4000/v1/chat/completions \
 - **Президио** (`presidio-server/app.py`) загружает кастомные распознаватели из
   `presidio_config.yaml` (сущности `SECRET_KEY`, `DB_CONNECTION`, `INTERNAL_IP`
   поверх стандартных `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `CREDIT_CARD` и т.д.).
-- LiteLLM подключает Presidio через callback `callbacks: ["presidio"]` и env-переменные
-  `PRESIDIO_ANALYZER_API_BASE` / `PRESIDIO_ANONYMIZER_API_BASE`.
+- LiteLLM подключает Presidio через гардрейл `guardrails` в `config.yaml`
+  (`guardrail: presidio`, `default_on: true`) и env-переменные
+  `PRESIDIO_ANALYZER_API_BASE` / `PRESIDIO_ANONYMIZER_API_BASE` — срабатывает на
+  **все** запросы, в т.ч. исходящие к OmniRoute.
+- **Де-анонимизация ответов**: включена через `output_parse_pii: true` +
+  `presidio_filter_scope: input`. Входящий запрос маскируется нумерованными
+  токенами (`<EMAIL_ADDRESS_1>`, `<PERSON_1>` и т.п.), а ответ модели (включая
+  аргументы tool-call'ов) восстанавливается к оригинальным значениям, чтобы
+  Hermes и пользователь локально видели реальные данные. В облако при этом
+  уходят только заглушки. Маскируется только исходящее (`presidio_filter_scope:
+  input`) — ответ назад не пере-маскируется.
 - Проверка: `curl http://localhost:5001/health` → `{"status":"ok"}`.
 
 ## Полезные проверки
@@ -173,7 +182,7 @@ curl http://localhost:4000/v1/chat/completions \
   Данные gateway лежат в томе `omniroute-data` (`docker volume inspect` / бэкап через
   `docker run --rm -v omniroute-data:/app/data -v $PWD:/backup alpine cp -r /app/data /backup`).
 - Кастомный callback `litellm-proxy/custom_presidio.py` не используется — работает
-  встроенный callback `"presidio"`.
+  встроенный Presidio-гардрейл (`guardrail: presidio`).
 - Вспомогательные вызовы Hermes (заголовки сессий, сжатие контекста, извлечение
   с веба и т.п.) по умолчанию ходят на чужие эндпоинты (`gpt-4o-mini`,
   openrouter/nous) — их нет в этом стеке. Файл `hermes_config.yaml`

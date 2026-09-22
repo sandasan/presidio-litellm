@@ -7,9 +7,14 @@
 `provision_omniroute.sh`), а OmniRoute сам выбирает модель, агрегирует квоты и
 фолбэчится между free-тирами.
 
-Анонимизация при этом не страдает: callback `presidio` из `litellm_settings`
-применяется ко ВСЕМ исходящим запросам LiteLLM, в т.ч. к единственному
-маршруту к OmniRoute — PII маскируется до выхода из прокси.
+Анонимизация при этом не страдает: пресidio-гардрейл из секции `guardrails`
+(`guardrail: presidio`, `default_on: true`) применяется ко ВСЕМ запросам LiteLLM,
+в т.ч. к единственному маршруту к OmniRoute — PII маскируется до выхода из
+прокси. Дополнительно включена де-анонимизация ответа (`output_parse_pii` +
+`presidio_filter_scope: input`): входящий запрос маскируется токенами
+`<PERSON_1>` и т.п., а ответ модели (и аргументы tool-call'ов) восстанавливаются
+к оригинальным значениям, чтобы Hermes и пользователь локально видели реальные
+данные. В облако при этом уходят только заглушки.
 
 Скрипт использует только стандартную библиотеку, чтобы работать и на хосте,
 и внутри контейнера litellm без лишних зависимостей.
@@ -35,8 +40,9 @@ def omniroute_route() -> dict:
     агрегирует квоты бесплатных моделей openrouter/gemini/groq/mistral, уходит с
     исчерпавших лимит на живых и ретраит. Комбо создаётся скриптом
     provision_omniroute.sh при первом запуске стека.
-    Запросы приходят сюда уже деидентифицированными через Presidio (callback в
-    litellm_settings ниже), поэтому PII-защита сохраняется на всём пути.
+    Запросы приходят сюда уже деидентифицированными через Presidio (гардрейл в
+    секции `guardrails` ниже), поэтому PII-защита сохраняется на всём пути,
+    а ответ восстановливается к оригиналу через output_parse_pii.
 
     `model_info.max_input_tokens`: OmniRoute репортит для комбо 32 768 (контекст
     самой маленькой бесплатной модели), но Hermes-агенту нужен контекст >= 64K.
@@ -89,7 +95,21 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
             "  cooldown_time: 60",
             "",
             "litellm_settings:",
-            '  callbacks: ["presidio", "custom_callbacks.proxy_handler_instance"]',
+            '  callbacks: ["custom_callbacks.proxy_handler_instance"]',
+            "",
+            # Presidio-гардрейл: маскирование входящего запроса (pre_call) и
+            # восстановление оригинальных значений в ответе модели (post_call).
+            # presidio_filter_scope: input => маскируем только то, что уходит
+            # к провайдеру; ответ обратно не пере-маскируется. default_on: true
+            # включает гардрейл для всех запросов без заголовков/префиксов.
+            "guardrails:",
+            "  - guardrail_name: presidio-anonymizer",
+            "    litellm_params:",
+            "      guardrail: presidio",
+            "      mode: pre_call",
+            "      default_on: true",
+            "      output_parse_pii: true",
+            "      presidio_filter_scope: input",
             "",
         ]
     )

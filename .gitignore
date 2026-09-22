@@ -12,6 +12,8 @@ venv/
 # IDE
 .idea/
 .vscode/
+!.vscode/
+!.vscode/tasks.json
 
 # Docker / временные файлы
 logs/

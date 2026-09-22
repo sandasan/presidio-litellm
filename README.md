@@ -471,6 +471,23 @@ docker exec -it hermes-agent hermes-chat chat --provider custom -m cloud-sanitiz
 Если расширение поддерживает режим "agent/server" или "stdio", используйте
 точно эту команду в качестве входа для локального ACP-сервера Hermes.
 
+Для этого репозитория уже добавлены готовые файлы запуска:
+
+- `hermes-acp.sh` — обёртка над `docker exec ... hermes acp --accept-hooks`
+- `.vscode/tasks.json` — задача VS Code `Hermes ACP`
+
+Запуск из VS Code:
+
+```bash
+# в терминале VS Code
+./hermes-acp.sh
+# или Terminal -> Run Task -> Hermes ACP
+```
+
+Внутри контейнера используется тот же защищённый маршрут:
+`HERMES_GRANTS=<project-name>` + `CUSTOM_BASE_URL=http://litellm:4000/v1` +
+`CUSTOM_API_KEY=sk-dummy`.
+
 После этого Hermes работает как ассистент прямо в редакторе поверх того же
 анонимизированного маршрута.
 

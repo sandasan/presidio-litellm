@@ -191,6 +191,66 @@ curl http://localhost:4000/v1/chat/completions \
 агентского цикла и инструментов Hermes (работа с файлами, шелл, сессии);
 это просто общение с моделями маршрута `cloud-sanitized-auto` через наш стек.
 
+## Hermes в VSCode
+
+Использовать нашего агента Hermes для помощи в программировании из VSCode
+можно тремя способами.
+
+### 1. Встроенный терминал VSCode (работает сразу)
+
+Контейнер `hermes-agent` монтирует `/home/alexander/projects` (ваши проекты)
+в `/workspace` и уже настроен на маршрут `cloud-sanitized-auto` через LiteLLM
+(поэтому анонимизация и де-анонимизация работают как в консоли). Откройте
+терминал в VSCode и запустите:
+
+```bash
+docker exec -it hermes-agent hermes chat --provider custom -m cloud-sanitized-auto
+```
+
+- Интерактивный чат с полным агентским циклом (Hermes сам читает и правит файлы
+  в `/workspace`).
+- Сессии: `--continue` возобновляет последнюю, `-r <session_id>` — конкретную.
+- Разовые задачи без интерактива:
+  ```bash
+  docker exec hermes-agent hermes -z "Задача..."
+  ```
+  или `hermes chat -q "Задача..."`.
+
+### 2. Полноценная редакторная интеграция — ACP (VS Code / Zed / JetBrains)
+
+У Hermes есть нативный режим для редакторов — **Agent Client Protocol**
+(`hermes acp --help` → «editor integration (VS Code, Zed, JetBrains)»). Он
+даёт работу как у IDE-ассистента: видение файлов, diff, применение правок.
+
+⚠️ В нашем образе ACP-зависимости пока не установлены — проверить:
+`docker exec hermes-agent hermes acp --check`. Чтобы включить:
+
+1. В `Dockerfile.hermes` замените установку Hermes на
+   `pip install --no-cache-dir 'hermes-agent[acp]'`.
+2. Пересоберите образ и пересоздайте контейнер:
+   ```bash
+   docker compose up -d --build hermes-agent
+   ```
+3. В VSCode установите расширение с поддержкой ACP (например, расширение
+   Claude Code или Continue) и укажите запуск агента через
+   `docker exec -i hermes-agent hermes acp`.
+
+После этого Hermes работает как ассистент прямо в редакторе поверх того же
+анонимизированного маршрута.
+
+### 3. Копайлот-расширения на маршрут LiteLLM (не Hermes)
+
+Любое OpenAI-совместимое расширение **Cline / Roo Code / Continue** можно
+подключить напрямую к прокси:
+
+- Base URL: `http://localhost:4000/v1`
+- Model: `cloud-sanitized-auto`
+- API key: `sk-dummy`
+
+Подсказки и правки в редакторе пойдут через тот же стек (Presidio +
+де-анонимизация), но это **не** агент Hermes — агентского цикла, сессий и
+рабочих инструментов у этого варианта нет.
+
 ## Полезные проверки
 
 ```bash
@@ -226,3 +286,119 @@ curl http://localhost:4000/v1/chat/completions \
   (монтируется в контейнер как `/root/.hermes/config.yaml`) переводит текстовые
   aux-задачи на наш канал `cloud-sanitized-auto` (LiteLLM → Presidio → OmniRoute);
   мультимодальные задачи (vision/mcp) не трогаются.
+
+## Как собрать такой проект с нуля
+
+Пошаговая сборка стека «Hermes + Presidio + LiteLLM + OmniRoute + Open WebUI».
+Здесь описано, из каких частей состоит репозиторий и в каком порядке они
+создаются. Итоговая структура:
+
+```
+.
+├── .env.example                 # шаблон ключей (копировать в .env)
+├── docker-compose.yml           # сервисы: presidio, omniroute, litellm, hermes-agent, open-webui
+├── update_models_and_run.sh     # запуск всего стека одной командой
+├── provision_omniroute.sh       # идемпотентный провижининг OmniRoute
+├── hermes_config.yaml           # Hermes: модель + aux-задачи через LiteLLM
+├── presidio_config.yaml         # кастомные распознаватели PII
+├── presidio-server/             # FastAPI-обёртка над Presidio
+│   ├── Dockerfile
+│   └── app.py                   # /analyze, /anonymize, /health
+├── litellm-proxy/
+│   ├── generate_config.py       # пишет config.yaml (маршрут + guardrails presidio)
+│   ├── custom_callbacks.py      # clamp max_tokens
+│   └── custom_presidio.py       # не используется (работает встроенный гардрейл)
+├── Dockerfile.hermes            # образ агента Hermes
+└── README.md
+```
+
+### 1. Каркас, ключи и `.gitignore`
+
+1. Создайте каталог проекта и `.env.example`:
+   ```bash
+   OPENROUTER_API_KEY=   GEMINI_API_KEY=   GROQ_API_KEY=   MISTRAL_API_KEY=
+   OMNIROUTE_API_KEY=sk-omniroute
+   OMNIROUTE_INITIAL_PASSWORD=omniro2026!
+   OMNIROUTE_MEMORY_MB=1024
+   ```
+   Скопируйте в `.env` и впишите свои ключи. В `.gitignore` обязательно
+   исключите `.env`, `__pycache__/`, `.idea/`, `.vscode/` и сгенерированный
+   `litellm-proxy/config.yaml`.
+
+### 2. Presidio-сервер
+
+- `presidio-server/Dockerfile`: образ Python, ставит `presidio-analyzer`,
+  `presidio-anonymizer`, `spacy`, `fastapi`, `uvicorn`, запекает модель
+  `en_core_web_lg`, запускает `uvicorn app:app --port 5001`.
+- `presidio-server/app.py`: FastAPI-обёртка — `POST /analyze`, `POST /anonymize`,
+  `GET /health`.
+- `presidio_config.yaml`: кастомные распознаватели поверх стандартных сущностей
+  Presidio — `SECRET_KEY` (API-ключи/токены), `DB_CONNECTION` (строки
+  подключения), `INTERNAL_IP` (приватные IPv4). Лимит: у каждого
+  распознавателя обязательно `supported_entity`, иначе Analyzer их не отдаст.
+
+### 3. OmniRoute и провижининг
+
+- Сервис `omniroute` в `docker-compose.yml`: образ `diegosouzapw/omniroute:latest`,
+  порт `127.0.0.1:20128`, том `omniroute-data`, env:
+  - `INITIAL_PASSWORD` — пароль bootstrap (первый старт фиксирует его);
+  - `OMNIROUTE_API_KEY` — passthrough-ключ для `LiteLLM → OmniRoute`;
+  - `{PROVIDER_ID}_API_KEY` — облачные ключи (`OPENROUTER_`, `GEMINI_`, ...);
+  - `OMNIROUTE_MEMORY_MB` — размер V8-кучи.
+- `provision_omniroute.sh`: идемпотентно логинится в management API, подключает
+  провайдеров openrouter/gemini/groq/mistral из `.env` (когда коннекшна ещё нет)
+  и создаёт комбо `cloud-auto` (стратегия `auto`, только бесплатные модели).
+  Повторный запуск безопасен (пропускает уже созданное).
+
+### 4. LiteLLM-прокси и анонимизация
+
+- Каталог `litellm-proxy/`: `generate_config.py` при старте контейнера пишет
+  `config.yaml` с **одним** маршрутом `cloud-sanitized-auto` →
+  `openai/cloud-auto` @ `http://omniroute:20128/v1`.
+- В `config.yaml` также секция `guardrails` — встроенный Presidio-гардрейл:
+  ```yaml
+  guardrails:
+    - guardrail_name: presidio-anonymizer
+      litellm_params:
+        guardrail: presidio
+        mode: pre_call
+        default_on: true
+        output_parse_pii: true
+        presidio_filter_scope: input
+  ```
+  `output_parse_pii: true` + `presidio_filter_scope: input` дают маскирование
+  запроса нумерованными токенами (`<EMAIL_ADDRESS_1>`) и де-анонимизацию ответа
+  (см. «Анонимизация»). Base URL'ы Presidio подхватываются из env
+  (`PRESIDIO_ANALYZER_API_BASE` / `PRESIDIO_ANONYMIZER_API_BASE`).
+- `litellm-proxy/custom_callbacks.py`: кастомный коллбек `MaxTokensClamp` —
+  режет исходящий `max_tokens` до `MAX_OUTPUT_TOKENS`, чтобы запросы агента
+  вписывались в лимиты бесплатных моделей.
+
+### 5. Агент Hermes
+
+- `Dockerfile.hermes`: Python 3.11-slim, venv, `pip install hermes-agent`.
+- Сервис монтирует `/home/alexander/projects` в `/workspace` и подключается к
+  LiteLLM как `custom`-провайдер (`CUSTOM_BASE_URL=http://litellm:4000/v1`,
+  `CUSTOM_API_KEY=sk-dummy`).
+- `hermes_config.yaml` переводит aux-задачи Hermes (заголовки сессий, сжатие
+  контекста, веб-экстракция, skills_hub, approval) на наш канал —
+  `model: cloud-sanitized-auto`, `provider: custom`,
+  `base_url: http://litellm:4000/v1`.
+
+### 6. Чат-интерфейс Open WebUI
+
+Сервис `open-webui` (`ghcr.io/open-webui/open-webui:main`), порт `3000:8080`,
+том `open-webui-data`, `OPENAI_API_BASE_URL=http://litellm:4000/v1` —
+весь чат-трафик идёт через те же анонимизацию и маршрут (см. «Чат в
+браузере»).
+
+### 7. `docker-compose.yml` и запуск
+
+- Порядок зависимостей: `litellm` ждёт `presidio` и `omniroute` healthy;
+  `hermes-agent` и `open-webui` зависят от `litellm`.
+- `update_models_and_run.sh` выполняет порядок: `omniroute` отдельно →
+  прогрев → `provision_omniroute.sh` → весь стек → готовность LiteLLM → чат
+  Hermes. Запуск одной командой:
+  ```bash
+  ./update_models_and_run.sh
+  ```

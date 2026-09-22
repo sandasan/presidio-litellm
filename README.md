@@ -519,6 +519,37 @@ docker exec -it \
 После этого Hermes работает как ассистент прямо в редакторе поверх того же
 анонимизированного маршрута.
 
+#### Краткая памятка: как подключить Hermes ACP в VS Code
+
+1. Убедитесь, что стек поднят:
+   ```bash
+   ./update_models_and_run.sh
+   ```
+2. Запустите один из вариантов:
+   ```bash
+   ./hermes-acp.sh
+   ```
+   или через VS Code task: `Terminal → Run Task → Hermes ACP`.
+3. В клиенте ACP выберите сервер со стандартным вводом/выводом или командой:
+   ```bash
+   docker exec -i hermes-agent hermes acp
+   ```
+   Если используется режим с принятием хуков, запускайте обёртку
+   `./hermes-acp.sh`, которая уже включает `--accept-hooks`.
+4. Важно: агент должен видеть только нужный проект через `HERMES_GRANTS`.
+   Для этого репозитория достаточно:
+   ```bash
+   export HERMES_GRANTS=presidio-litellm
+   ```
+5. Проверка готовности:
+   ```bash
+   docker exec hermes-agent hermes acp --check
+   ```
+
+Этот режим использует тот же защищённый маршрут: `cloud-sanitized-auto` →
+LiteLLM → Presidio → OmniRoute. Все запросы идут через анонимизацию PII до
+отправки на провайдер.
+
 ### 3. Continue / Cline / Roo Code на маршрут LiteLLM (не Hermes)
 
 Любое OpenAI-совместимое расширение **Continue / Cline / Roo Code** можно

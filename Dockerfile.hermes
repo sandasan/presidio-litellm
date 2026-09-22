@@ -16,9 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev &
 COPY presidio-litellm/filegate.c /build/filegate.c
 RUN gcc -shared -fPIC -O2 -o /usr/local/lib/filegate.so /build/filegate.c -ldl && rm -rf /build
 
-# Устанавливаем Hermes Agent напрямую из PyPI
+# Устанавливаем Hermes Agent напрямую из PyPI с ACP-расширениями для
+# полноценной редакторной интеграции (VS Code / Zed / JetBrains).
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir hermes-agent
+    pip install --no-cache-dir 'hermes-agent[acp]'
 
 WORKDIR /workspace
 

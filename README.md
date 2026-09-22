@@ -443,18 +443,33 @@ docker exec -it hermes-agent hermes-chat chat --provider custom -m cloud-sanitiz
 (`hermes acp --help` → «editor integration (VS Code, Zed, JetBrains)»). Он
 даёт работу как у IDE-ассистента: видение файлов, diff, применение правок.
 
-⚠️ В нашем образе ACP-зависимости пока не установлены — проверить:
-`docker exec hermes-agent hermes acp --check`. Чтобы включить:
+⚠️ В нашем образе ACP-зависимости нужно установить явно. Проверка:
+`docker exec hermes-agent hermes acp --check`.
 
-1. В `Dockerfile.hermes` замените установку Hermes на
-   `pip install --no-cache-dir 'hermes-agent[acp]'`.
+Чтобы включить полноценную редакторную интеграцию:
+
+1. В `Dockerfile.hermes` установите ACP-опции Hermes:
+   ```dockerfile
+   RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+       pip install --no-cache-dir 'hermes-agent[acp]'
+   ```
 2. Пересоберите образ и пересоздайте контейнер:
    ```bash
    docker compose up -d --build hermes-agent
    ```
-3. В VSCode установите расширение с поддержкой ACP (например, расширение
-   Claude Code или Continue) и укажите запуск агента через
-   `docker exec -i hermes-agent hermes acp`.
+3. Проверьте, что ACP готов:
+   ```bash
+   docker exec hermes-agent hermes acp --check
+   ```
+4. В VSCode установите расширение с поддержкой ACP (например, Continue или
+   совместимый клиент для Agent Client Protocol) и задайте команду запуска
+   агента как:
+   ```bash
+   docker exec -i hermes-agent hermes acp
+   ```
+
+Если расширение поддерживает режим "agent/server" или "stdio", используйте
+точно эту команду в качестве входа для локального ACP-сервера Hermes.
 
 После этого Hermes работает как ассистент прямо в редакторе поверх того же
 анонимизированного маршрута.

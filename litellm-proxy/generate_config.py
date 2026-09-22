@@ -95,7 +95,7 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
             "  cooldown_time: 60",
             "",
             "litellm_settings:",
-            '  callbacks: ["custom_callbacks.proxy_handler_instance"]',
+            '  callbacks: ["custom_callbacks.proxy_handler_instance", "custom_callbacks.secret_masker_instance"]',
             "",
             # Presidio-гардрейл: маскирование входящего запроса (pre_call) и
             # восстановление оригинальных значений в ответе модели (post_call).

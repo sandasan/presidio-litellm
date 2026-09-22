@@ -91,12 +91,29 @@ services:
       - /home/alexander/projects:/workspace
       # Стабильный конфиг Hermes (модель + aux-задачи через LiteLLM/Presidio)
       - ./hermes_config.yaml:/root/.hermes/config.yaml
+      # Управление доступом к каталогам: обёртка запуска, вычислитель блок-листа
+      # (grants + .gitignore/.aiignore) и файл выданных грантов
+      - ./hermes-chat.sh:/usr/local/bin/hermes-chat:ro
+      - ./hermes-filegate.py:/usr/local/bin/hermes-filegate.py:ro
+      - ./hermes_grants.json:/root/.hermes/grants.json
     environment:
       # Указываем агенту адрес LiteLLM внутри Docker-сети
       - CUSTOM_BASE_URL=http://litellm:4000/v1
       - CUSTOM_API_KEY=sk-dummy
       - OPENAI_BASE_URL=http://litellm:4000/v1
       - OPENAI_API_KEY=sk-dummy
+      # Egress lock: весь исходящий трафик агента, кроме внутренних сервисов
+      # стека, отправляется на несуществующий прокси и молча падает. LLM-запросы
+      # к litellm ходят напрямую (NO_PROXY), а любые внешние вызовы (curl,
+      # чужие эндпоинты aux-задач, vision/MCP, компиляторы, телеметрия) —
+      # блокируются на сетевом уровне ещё до выхода из контейнера.
+      # Сознательное следствие: браузер/веб-сёрфинг внутри агента не работают.
+      - HTTP_PROXY=http://127.0.0.1:65533
+      - HTTPS_PROXY=http://127.0.0.1:65533
+      - http_proxy=http://127.0.0.1:65533
+      - https_proxy=http://127.0.0.1:65533
+      - NO_PROXY=litellm,presidio,omniroute,open-webui,localhost,127.0.0.1,.local
+      - no_proxy=litellm,presidio,omniroute,open-webui,localhost,127.0.0.1,.local
     working_dir: /workspace
     depends_on:
       - litellm

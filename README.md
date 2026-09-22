@@ -52,7 +52,7 @@ Open WebUI ────►
    ./provision_omniroute.sh                # ключи из .env + комбо cloud-auto
    docker compose up -d --build            # остальной стек
    docker exec -e CUSTOM_BASE_URL=http://litellm:4000/v1 -e CUSTOM_API_KEY=sk-dummy \
-     hermes-agent hermes chat --provider custom -m cloud-sanitized-auto
+     hermes-agent hermes-chat chat --provider custom -m cloud-sanitized-auto
    ```
 
 ## Как устроен маршрут
@@ -155,6 +155,12 @@ curl http://localhost:4000/v1/chat/completions \
   Hermes и пользователь локально видели реальные данные. В облако при этом
   уходят только заглушки. Маскируется только исходящее (`presidio_filter_scope:
   input`) — ответ назад не пере-маскируется.
+- **Литеральные секреты** (`custom_callbacks.py`, класс `LiteralSecretMasker`):
+  точные значения, которые Presidio не распознаёт как PII-паттерн (внутренние
+  имена сервисов, кодовые слова, хвосты ключей), можно занести в
+  `litellm-proxy/secrets_map.json` — они будут детерминированно заменяться на
+  `<PLACEHOLDER>` до отправки провайдеру и восстанавливаться в ответе, как и
+  токены Presidio. Подробнее в «Литеральные секреты».
 - Проверка: `curl http://localhost:5001/health` → `{"status":"ok"}`.
 
 ## Границы защиты
@@ -168,6 +174,15 @@ curl http://localhost:4000/v1/chat/completions \
 - **Секреты из наших кастомных распознавателей** (`presidio_config.yaml`):
   API-ключи и токены (`sk-*`, `AIza*`, Bearer, `PRIVATE KEY`), строки
   подключения к БД, приватные IPv4 (`10.x`, `172.16–31.x`, `192.168.x`).
+- **Литеральные секреты** из `litellm-proxy/secrets_map.json`: точные значения,
+  не поддающиеся паттерну (имена сервисов, кодовые слова и т.п.) — заменяются
+  на `<PLACEHOLDER>` до отправки провайдеру (см. «Литеральные секреты»).
+- Всё исходящее из контейнера агента **заперто**: egress lock закрывает
+  любые внешние HTTP(S)-запросы Hermes (см. «Защита контура агента»), так что
+  данных при prompt-инъекции наружу не уйдёт.
+- Файловая видимость агента **контролируется грантами**: без разрешения он
+  не читает чужие каталоги, а внутри разрешённого каталога — файлы из
+  `.gitignore`/`.aiignore` и "подобных" (см. «Разрешения на каталоги»).
 - Весь трафик идёт единственным путём → мимо анонимизации ничего не уходит;
   OmniRoute и провайдер получают **уже замаскированный** текст,
   де-анонимизация (таблица соответствий) живёт локально в памяти LiteLLM.
@@ -178,16 +193,124 @@ curl http://localhost:4000/v1/chat/completions \
 
 | Риск | Что происходит |
 |------|----------------|
-| Не-PII конфиденциальные данные | Анонимизация распознаёт **шаблоны**, а не семантику. Код, архитектура, бизнес-логика, внутренние названия — уходят провайдеру в открытом виде |
+| Не-PII конфиденциальные данные | Анонимизация распознаёт **шаблоны**, а не семантику. Код, архитектура, бизнес-логика, внутренние названия — уходят провайдеру в открытом виде (если не занесены в `secrets_map.json`) |
 | Облачные провайдеры | Модели могут быть «учителем» или хранить запросы по своим политикам; это не внутри нашего контроля |
-| Vision/MCP-подзадачи Hermes | Мультимодальные задачи (vision/mcp) **не** переведены на наш канал (см. «Примечания») и могут уходить на дефолтные эндпоинты openrouter/nous |
-| Инструменты агента | Hermes умеет делать прямые HTTP-запросы (bash/web). При prompt-инъекции (из прочитанного файла или скачанной страницы) он может послать данные наружу мимо анонимизации |
+| Vision/MCP-подзадачи Hermes | Мультимодальные задачи (vision/mcp) не переведены на наш канал (см. «Примечания»); egress lock отключает обращение к дефолтным эндпоинтам openrouter/nous |
 | Метаданные | Внешний IP хоста, тайминги и размеры запросов провайдеру видны в любом случае |
+| Симлинки внутри гранта | `filegate` пускает реально существующие пути и не «разглядывает» симлинки, ведущие за пределы гранта вне `/workspace` (в системные каталоги). Бэкап разрешённой директории не должен содержать ссылок на данные вне неё |
+| Открытый FTP и прочие не-HTTP | Egress lock закрывает HTTP(S)-соединения; трафик иных протоколов контейнеру не нужен, но отдельным firewall-аппетайдом он не перекрыт |
 
 **Как этим пользоваться**: стек делает комфортной работу с персональными
 данными и секретами (маскируются до отправки). Произвольные проприетарные
 данные (закрытый код под NDA, продуктовые тайны) облаку отдавать не стоит —
 для них нужна локальная модель или осознанно доверенный провайдер.
+
+## Защита контура агента
+
+Три дополнения поверх анонимизации, которые закрывают основные дыры из
+«Границы защиты»: секреты-литералы, исход трафика из контейнера и файловая
+видимость агента.
+
+### Литеральные секреты
+
+Presidio распознаёт только **паттерны**. Если в коде встречается внутреннее
+имя сервиса, кодовое слово или хвост ключа, которые шаблоном не поймать, —
+занесите их в `litellm-proxy/secrets_map.json` (рядом лежит шаблон
+`secrets_map.example.json`):
+
+```json
+{
+  "MY_INTERNAL_SERVICE_NAME": "некое-внутреннее-имя-сервиса",
+  "MY_PROD_DB_PASSWORD": "hunter2"
+}
+```
+
+Файл исключён из git (см. `.gitignore`) — не коммитьте его. После изменения
+перезапустите `litellm`: `docker compose up -d --force-recreate litellm`.
+
+Как работает: callback `LiteralSecretMasker` в `litellm-proxy/custom_callbacks.py`
+в `async_pre_call_hook` рекурсивно заменяет **точные вхождения** значений на
+`<PLACEHOLDER>` во всех строках запроса (system/user/tool, вложенные поля), а
+`async_post_call_success_hook` и `async_post_call_streaming_iterator_hook`
+восстанавливают оригинал в ответе — и в обычном, и в стриминговом режиме.
+Провайдер видит только `<NAME>`, клиент — исходное значение. Если файла нет —
+маскер просто выключен, стек работает как раньше.
+
+⚠️ Подставляйте только уникальные **высокоэнтропийные** литералы (например
+`BananaIceCream80324Ops` или имя сервиса передавайте вместе с уникальным
+суффиксом, который в тексте не встречается). Короткие и частые строки (имена,
+слова) будут заменяться повсюду и ломать качество чата.
+
+Проверка: из чата попросите модель дословно повторить литерал — в ответе
+вернётся оригинал, а в reasoning модели будет виден только `<PLACEHOLDER>`.
+
+### Запирание исходящего трафика (egress lock)
+
+Контейнеру `hermes-agent` заданы прокси-переменные (см. `docker-compose.yml`):
+
+```
+HTTP_PROXY / HTTPS_PROXY (и http_proxy / https_proxy) = http://127.0.0.1:65533
+NO_PROXY / no_proxy = litellm,presidio,omniroute,open-webui,localhost,127.0.0.1,.local
+```
+
+Все HTTP(S)-запросы, кроме внутренних сервисов стека, уходят на
+несуществующий порт и **молча падают**. Осознанные последствия:
+
+- LLM-трафик агента (к `litellm`) не затронут — идёт напрямую по `NO_PROXY`;
+- веб-сёрфинг агента (задача `web_extract`, прямые `curl` из bash) больше не
+  работает;
+- vision/MCP aux-вызовы на чужие эндпоинты (openrouter/nous) — закрыты;
+- при prompt-инъекции агент физически не может достучаться наружу из контейнера.
+
+Проверка:
+
+```bash
+docker exec hermes-agent curl -m 5 -sS -o /dev/null -w '%{http_code}\n' http://litellm:4000/health/liveliness  # 200
+docker exec hermes-agent curl -m 5 -sS -o /dev/null https://example.com 2>&1            # connect refused
+```
+
+### Разрешения на каталоги (гранты + ignore-файлы)
+
+Контейнер монтирует `/home/alexander/projects` в `/workspace` целиком, но агент
+видит только то, на что получил **грант**. Запускайте агента через обёртку
+(не напрямую `hermes`):
+
+```bash
+docker exec -it hermes-agent hermes-chat chat --provider custom -m cloud-sanitized-auto
+```
+
+При первом запуске обёртка покажет список каталогов в `/workspace` и спросит,
+каким разрешить работать (номера через запятую, `all` или `none`). Выбор
+сохраняется в `hermes_grants.json` (монтируется в контейнер как
+`/root/.hermes/grants.json`) и применяется при следующих запусках. Для
+неинтерактивного сценария — `HERMES_GRANTS=proj1,proj2`:
+
+```bash
+docker exec -e HERMES_GRANTS=presidio-litellm hermes-agent hermes-chat chat --provider custom -m cloud-sanitized-auto
+```
+
+Что делает `hermes-chat`:
+
+1. Собирает список **запрещённых путей** на старте (`hermes-filegate.py`):
+   - все каталоги `/workspace`, кроме грантованных;
+   - внутри каждого гранта — правила из `.gitignore`, `.aiignore`,
+     `.cursorignore`, `.ignore`, `.npmignore`, `.dockerignore`,
+     `.git/info/exclude` плюс разумный дефолт (`node_modules/`,
+     `__pycache__/`, виртуальные окружения, `.env*`).
+2. Включает **LD_PRELOAD-перехватчик** `filegate.so` (компилируется в
+   `Dockerfile.hermes`): `open`/`openat` для запрещённых путей возвращают
+   `Permission denied`, кем бы ни шло чтение (cat, редактор, python, node).
+   Закрыты и целые подкаталоги (созданное внутри них позже тоже не прочитать),
+   и выход через симлинк в другой проект.
+3. Стартует `hermes` из корня гранта (или `/workspace`, если грантов несколько).
+
+Проверка:
+
+```bash
+docker exec -e HERMES_GRANTS=presidio-litellm hermes-agent hermes-chat --version
+# внутри гранта .env читается только как Permission denied, README.md доступен,
+# файлы других проектов — Permission denied
+```
 
 ## Чат в браузере (Open WebUI)
 
@@ -236,17 +359,18 @@ curl http://localhost:4000/v1/chat/completions \
 терминал в VSCode и запустите:
 
 ```bash
-docker exec -it hermes-agent hermes chat --provider custom -m cloud-sanitized-auto
+docker exec -it hermes-agent hermes-chat chat --provider custom -m cloud-sanitized-auto
 ```
 
 - Интерактивный чат с полным агентским циклом (Hermes сам читает и правит файлы
-  в `/workspace`).
+  в `/workspace`). При первом запуске спросит, каким каталогам разрешить доступ
+  (гранты, см. «Разрешения на каталоги»).
 - Сессии: `--continue` возобновляет последнюю, `-r <session_id>` — конкретную.
-- Разовые задачи без интерактива:
+- Разовые задачи без интерактива (грант задаётся явно, иначе каталоги закрыты):
   ```bash
-  docker exec hermes-agent hermes -z "Задача..."
+  docker exec -e HERMES_GRANTS=presidio-litellm hermes-agent hermes-chat -z "Задача..."
   ```
-  или `hermes chat -q "Задача..."`.
+  или `hermes-chat chat -q "Задача..."`.
 
 ### 2. Полноценная редакторная интеграция — ACP (VS Code / Zed / JetBrains)
 
@@ -299,6 +423,18 @@ grep 'model:' litellm-proxy/config.yaml
 curl http://localhost:4000/v1/chat/completions \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer sk-dummy' \
   -d '{"model":"cloud-sanitized-auto","messages":[{"role":"user","content":"Мой email vasya@example.com, назови столицу Франции"}]}'
+
+# egress lock: внутри работает, наружу — refused
+docker exec hermes-agent curl -m 5 -sS -o /dev/null http://litellm:4000/health/liveliness
+docker exec hermes-agent curl -m 5 -sS -o /dev/null https://example.com 2>&1 | tail -1
+
+# гранты: что попало в блок-лист и чем это подтверждается
+docker exec hermes-agent python3 /usr/local/bin/hermes-filegate.py \
+  --workspace /workspace --grants presidio-litellm
+BLOCK=$(docker exec hermes-agent python3 /usr/local/bin/hermes-filegate.py \
+  --workspace /workspace --grants presidio-litellm)
+docker exec -e HERMES_BLOCK="$BLOCK" -e LD_PRELOAD=/usr/local/lib/filegate.so \
+  hermes-agent cat /workspace/presidio-litellm/.env 2>&1 | tail -1   # Permission denied
 ```
 
 ## Примечания
@@ -317,7 +453,12 @@ curl http://localhost:4000/v1/chat/completions \
   openrouter/nous) — их нет в этом стеке. Файл `hermes_config.yaml`
   (монтируется в контейнер как `/root/.hermes/config.yaml`) переводит текстовые
   aux-задачи на наш канал `cloud-sanitized-auto` (LiteLLM → Presidio → OmniRoute);
-  мультимодальные задачи (vision/mcp) не трогаются.
+  мультимодальные задачи (vision/mcp) не трогаются. Из-за egress lock реальный
+  веб-сёрфинг (`web_extract`, прямые запросы из bash) внутри контейнера закрыт,
+  а aux-задачи, завёрнутые на `litellm`, работают.
+- Запуск агента — **через обёртку `hermes-chat`**, а не напрямую `hermes`: только
+  так действуют гранты каталогов и ignore-файлы (см. «Разрешения на каталоги»).
+  Это касается и VSCode-терминала, и команды `update_models_and_run.sh`.
 
 ## Как собрать такой проект с нуля
 
@@ -332,15 +473,20 @@ curl http://localhost:4000/v1/chat/completions \
 ├── update_models_and_run.sh     # запуск всего стека одной командой
 ├── provision_omniroute.sh       # идемпотентный провижининг OmniRoute
 ├── hermes_config.yaml           # Hermes: модель + aux-задачи через LiteLLM
+├── hermes_grants.json           # выданные агенту гранты на каталоги (см. «Разрешения на каталоги»)
+├── hermes-chat.sh               # обёртка запуска Hermes: гранты + blocklist + LD_PRELOAD
+├── hermes-filegate.py           # вычисление блок-листа из грантов и ignore-файлов
+├── filegate.c                   # LD_PRELOAD-перехватчик open/openat (собирается в Dockerfile.hermes)
 ├── presidio_config.yaml         # кастомные распознаватели PII
 ├── presidio-server/             # FastAPI-обёртка над Presidio
 │   ├── Dockerfile
 │   └── app.py                   # /analyze, /anonymize, /health
 ├── litellm-proxy/
 │   ├── generate_config.py       # пишет config.yaml (маршрут + guardrails presidio)
-│   ├── custom_callbacks.py      # clamp max_tokens
+│   ├── custom_callbacks.py      # MaxTokensClamp + LiteralSecretMasker
+│   ├── secrets_map.example.json # шаблон словаря литеральных секретов (копировать в secrets_map.json)
 │   └── custom_presidio.py       # не используется (работает встроенный гардрейл)
-├── Dockerfile.hermes            # образ агента Hermes
+├── Dockerfile.hermes            # образ агента Hermes (собирает filegate.so)
 └── README.md
 ```
 
@@ -402,13 +548,19 @@ curl http://localhost:4000/v1/chat/completions \
   запроса нумерованными токенами (`<EMAIL_ADDRESS_1>`) и де-анонимизацию ответа
   (см. «Анонимизация»). Base URL'ы Presidio подхватываются из env
   (`PRESIDIO_ANALYZER_API_BASE` / `PRESIDIO_ANONYMIZER_API_BASE`).
-- `litellm-proxy/custom_callbacks.py`: кастомный коллбек `MaxTokensClamp` —
-  режет исходящий `max_tokens` до `MAX_OUTPUT_TOKENS`, чтобы запросы агента
-  вписывались в лимиты бесплатных моделей.
+- `litellm-proxy/custom_callbacks.py`: два кастомных коллбека:
+  - `MaxTokensClamp` — режет исходящий `max_tokens` до `MAX_OUTPUT_TOKENS`,
+    чтобы запросы агента вписывались в лимиты бесплатных моделей;
+  - `LiteralSecretMasker` — маскирует точные значения из
+    `litellm-proxy/secrets_map.json` (см. «Литеральные секреты») и
+    восстанавливает их в ответе. Оба коллбека подключены через
+    `litellm_settings.callbacks` в `config.yaml`.
 
 ### 5. Агент Hermes
 
-- `Dockerfile.hermes`: Python 3.11-slim, venv, `pip install hermes-agent`.
+- `Dockerfile.hermes`: Python 3.11-slim, venv, `pip install hermes-agent`;
+  ставит `gcc libc6-dev` и компилирует `filegate.so` из `filegate.c`
+  (LD_PRELOAD-перехватчик для «Разрешения на каталоги»).
 - Сервис монтирует `/home/alexander/projects` в `/workspace` и подключается к
   LiteLLM как `custom`-провайдер (`CUSTOM_BASE_URL=http://litellm:4000/v1`,
   `CUSTOM_API_KEY=sk-dummy`).
@@ -417,14 +569,27 @@ curl http://localhost:4000/v1/chat/completions \
   `model: cloud-sanitized-auto`, `provider: custom`,
   `base_url: http://litellm:4000/v1`.
 
-### 6. Чат-интерфейс Open WebUI
+### 6. Защита контура агента (egress lock + гранты)
+
+- **Egress lock** в `docker-compose.yml` сервиса `hermes-agent`: прокси-переменные
+  на несуществующий адрес + `NO_PROXY` с внутренними хостами. Весь внешний
+  трафик из контейнера молча падает, LLM-запросы к `litellm` идут напрямую
+  (см. «Запирание исходящего трафика»).
+- **Гранты на каталоги**: `hermes-chat.sh` (запуск агента вместо `hermes`) +
+  `hermes-filegate.py` (блок-лист из грантов и ignore-файлов) + `filegate.c`
+  (LD_PRELOAD-перехватчик). Гранты хранятся в `hermes_grants.json`,
+  монтируются как `/root/.hermes/grants.json` (см. «Разрешения на каталоги»).
+- **Литеральные секреты**: `litellm-proxy/secrets_map.json` +
+  `LiteralSecretMasker` (см. «Литеральные секреты»).
+
+### 7. Чат-интерфейс Open WebUI
 
 Сервис `open-webui` (`ghcr.io/open-webui/open-webui:main`), порт `3000:8080`,
 том `open-webui-data`, `OPENAI_API_BASE_URL=http://litellm:4000/v1` —
 весь чат-трафик идёт через те же анонимизацию и маршрут (см. «Чат в
 браузере»).
 
-### 7. `docker-compose.yml` и запуск
+### 8. `docker-compose.yml` и запуск
 
 - Порядок зависимостей: `litellm` ждёт `presidio` и `omniroute` healthy;
   `hermes-agent` и `open-webui` зависят от `litellm`.

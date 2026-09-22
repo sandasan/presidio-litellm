@@ -65,4 +65,4 @@ echo "🤖 Запуск Hermes Agent (модель cloud-sanitized-auto чере
 docker exec -it \
   -e CUSTOM_BASE_URL=http://litellm:4000/v1 \
   -e CUSTOM_API_KEY=sk-dummy \
-  hermes-agent hermes chat --provider custom -m cloud-sanitized-auto
+  hermes-agent hermes-chat chat --provider custom -m cloud-sanitized-auto

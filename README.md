@@ -291,6 +291,11 @@ docker exec hermes-agent curl -m 5 -sS -o /dev/null https://example.com 2>&1    
 docker exec -it hermes-agent hermes-chat chat --provider custom -m cloud-sanitized-auto
 ```
 
+> Важно: если запускать Hermes без явно заданного `HERMES_GRANTS`, обёртка
+> `hermes-chat` в интерактивном TTY может застрять на выборе каталога. Для
+> автоматического запуска в этом стеке используйте неинтерактивный режим с
+> `HERMES_GRANTS` или автоподстановкой в скрипте [`update_models_and_run.sh`](update_models_and_run.sh).
+
 При первом запуске обёртка покажет список каталогов в `/workspace` и спросит,
 каким разрешить работать (номера через запятую, `all` или `none`). Выбор
 сохраняется в `hermes_grants.json` (монтируется в контейнер как

@@ -62,7 +62,11 @@ curl -fsS -m 3 -o /dev/null http://localhost:3000 2>/dev/null \
   || echo "ℹ️ Open WebUI разогревается: http://localhost:3000"
 
 echo "🤖 Запуск Hermes Agent (модель cloud-sanitized-auto через LiteLLM + Presidio)..."
-docker exec -it \
+# Важно: Hermes запускается без -it и с явным HERMES_GRANTS, иначе обёртка
+# hermes-chat видит TTY и застревает на интерактивном выборе грантов.
+HERMES_GRANT="${HERMES_GRANTS:-$(basename "$PROJECT_DIR")}" \
+docker exec \
+  -e HERMES_GRANTS="$HERMES_GRANT" \
   -e CUSTOM_BASE_URL=http://litellm:4000/v1 \
   -e CUSTOM_API_KEY=sk-dummy \
   hermes-agent hermes-chat chat --provider custom -m cloud-sanitized-auto

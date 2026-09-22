@@ -62,6 +62,16 @@ pick_grants_interactive() {
     echo "$chosen_str"
 }
 
+pick_grants_default() {
+    local dirs=()
+    while IFS= read -r d; do dirs+=("$d"); done < <(find "$WORKSPACE" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort)
+    if [[ ${#dirs[@]} -eq 1 ]]; then
+        printf '%s\n' "${dirs[0]}"
+        return 0
+    fi
+    return 1
+}
+
 # 1. Гранты.
 GRANTS="${HERMES_GRANTS:-}"
 if [[ -z "$GRANTS" && -f "$GRANTS_FILE" ]]; then
@@ -73,7 +83,10 @@ except Exception:
     print("")' "$GRANTS_FILE" || true)"
 fi
 if [[ -z "$GRANTS" ]]; then
-    if [[ -t 0 && -t 1 ]]; then
+    GRANTS="$(pick_grants_default)" || true
+    if [[ -n "$GRANTS" ]]; then
+        echo "hermes-chat: auto-grant: $GRANTS" >&2
+    elif [[ -t 0 && -t 1 ]]; then
         GRANTS="$(pick_grants_interactive)" || true
     else
         echo "hermes-chat: гранты не заданы (HERMES_GRANTS или $GRANTS_FILE); агенту ничего не разрешено читать." >&2

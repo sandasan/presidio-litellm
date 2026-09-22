@@ -443,6 +443,34 @@ docker exec -it hermes-agent hermes-chat chat --provider custom -m cloud-sanitiz
 (`hermes acp --help` → «editor integration (VS Code, Zed, JetBrains)»). Он
 даёт работу как у IDE-ассистента: видение файлов, diff, применение правок.
 
+Самый короткий рабочий вариант для этого проекта:
+
+```bash
+./hermes-acp.sh
+```
+
+Файл `hermes-acp.sh` уже содержит корректную команду запуска:
+
+```bash
+exec docker exec -it \
+  -e HERMES_GRANTS="$GRANT" \
+  -e HERMES_ACCEPT_HOOKS=1 \
+  -e CUSTOM_BASE_URL=http://litellm:4000/v1 \
+  -e CUSTOM_API_KEY=sk-dummy \
+  hermes-agent hermes acp --accept-hooks
+```
+
+Или вручную:
+
+```bash
+docker exec -it \
+  -e HERMES_GRANTS=presidio-litellm \
+  -e HERMES_ACCEPT_HOOKS=1 \
+  -e CUSTOM_BASE_URL=http://litellm:4000/v1 \
+  -e CUSTOM_API_KEY=sk-dummy \
+  hermes-agent hermes acp --accept-hooks
+```
+
 ⚠️ В нашем образе ACP-зависимости нужно установить явно. Проверка:
 `docker exec hermes-agent hermes acp --check`.
 

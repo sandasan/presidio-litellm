@@ -23,7 +23,7 @@ recognizers:
         regex: "-----BEGIN [A-Z ]+ PRIVATE KEY-----"
         score: 1.0
 
-  # 2. Подключение к БД (Database Connection Strings)
+  # 2. Подключение к БД / очередям (Database Connection Strings)
   - name: "DbConnectionStringRecognizer"
     supported_language: "en"
     supported_entity: "DB_CONNECTION"
@@ -31,12 +31,92 @@ recognizers:
       - name: "DB Connection URI"
         regex: "(?i)(postgres|mysql|mariadb|mongodb\\+srv|mongodb|redis|oracle|mssql|sqlite):\\/\\/([^:]+):([^@]+)@([^:\\/]+):(\\d+)\\/([\\w\\-]+)"
         score: 1.0
+      - name: "Queue / Warehouse URI"
+        regex: "(?i)\\b(amqp|amqps|nats|kafka|rediss|clickhouse|snowflake|presto|trino):\\/\\/[^\\s<>\"']+"
+        score: 0.9
 
-  # 3. Приватные IPv4 и внутренние хосты
+  # 3. Приватные IP и внутренние сети
   - name: "InternalNetworkRecognizer"
     supported_language: "en"
     supported_entity: "INTERNAL_IP"
     patterns:
       - name: "Private IPv4"
         regex: "\\b(10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3})\\b"
+        score: 0.9
+      - name: "CGNAT IPv4"
+        regex: "\\b100\\.(?:6[4-9]|[7-9]\\d)\\.\\d{1,3}\\.\\d{1,3}\\b"
+        score: 0.85
+      - name: "Loopback IPv4"
+        regex: "\\b127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b"
+        score: 0.9
+      - name: "Link-local IPv4"
+        regex: "\\b169\\.254\\.\\d{1,3}\\.\\d{1,3}\\b"
+        score: 0.9
+      - name: "Private IPv6 (ULA)"
+        regex: "\\bfd[0-9a-fA-F]{2}:[0-9a-fA-F:]+\\b"
+        score: 0.9
+      - name: "Link-local IPv6"
+        regex: "\\bfe80:[0-9a-fA-F:]+\\b"
+        score: 0.9
+      - name: "Loopback IPv6"
+        regex: "\\b::1\\b"
+        score: 0.9
+
+  # 4. Внутренние хосты и домены: внутренние TLD (.internal, .corp, .local,
+  #    .lan, .intranet, .home, .docker) в чистом виде и в URL
+  - name: "InternalHostRecognizer"
+    supported_language: "en"
+    supported_entity: "INTERNAL_HOST"
+    patterns:
+      - name: "Internal FQDN"
+        regex: "\\b[a-zA-Z0-9](?:[a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?)+?\\.(?:internal|corp|local|lan|intranet|home|docker)\\b"
+        score: 0.9
+      - name: "Internal URL"
+        regex: "(?i)\\b(?:https?|git|ssh|ftp)://[a-zA-Z0-9._-]+\\.(?:internal|corp|local|lan|intranet|home|docker)(?::\\d{1,5})?(?:[/?#][^\\s<>\"']*)?"
+        score: 0.9
+
+  # 5. Внутренние пути: file/smb/nfs-URI и UNC (Windows-шары)
+  - name: "InternalPathRecognizer"
+    supported_language: "en"
+    supported_entity: "INTERNAL_PATH"
+    patterns:
+      - name: "File / Mount URI"
+        regex: "\\b(?:file|smb|nfs|cifs|storage)://[^\\s<>\"']+"
+        score: 0.9
+      - name: "UNC Path"
+        regex: "\\\\\\\\[A-Za-z0-9._-]+\\\\[^\\s<>\"']+"
+        score: 0.85
+
+  # 6. Ходовые форматы секретов поверх «Провайдерских» (JWT, GitHub, Slack,
+  #    Stripe, AWS, npm, Telegram, basic-auth в URL)
+  - name: "TokenVariantsRecognizer"
+    supported_language: "en"
+    supported_entity: "SECRET_KEY"
+    patterns:
+      - name: "JWT"
+        regex: "\\beyJ[A-Za-z0-9_=-]+\\.eyJ[A-Za-z0-9_=-]+\\.[A-Za-z0-9_\\-+/=]{4,}\\b"
+        score: 0.9
+      - name: "GitHub Classic Token"
+        regex: "(?i)\\b(?:ghp_|gho_|ghu_|ghs_)[A-Za-z0-9]{36}\\b"
+        score: 0.95
+      - name: "GitHub Fine-grained PAT"
+        regex: "(?i)\\bgithub_pat_[A-Za-z0-9_]{20,}\\b"
+        score: 0.95
+      - name: "npm Token"
+        regex: "\\bnpm_[A-Za-z0-9]{36}\\b"
+        score: 0.95
+      - name: "Slack Token"
+        regex: "\\bxox[baprs]-[0-9]{10,12}-[0-9]{10,12}-[A-Za-z0-9-]{24,}\\b"
+        score: 0.9
+      - name: "Stripe Key"
+        regex: "(?i)\\b(?:sk|pk)_(?:live|test)_[0-9A-Za-z]{24,}\\b"
+        score: 0.95
+      - name: "AWS Access Key ID"
+        regex: "\\bAKIA[0-9A-Z]{16}\\b"
+        score: 0.9
+      - name: "Telegram Bot Token"
+        regex: "\\b[0-9]{8,10}:AA[A-Za-z0-9_-]{33}\\b"
+        score: 0.95
+      - name: "Basic Auth in URL"
+        regex: "(?i)\\bhttps?://[^/\\s:@]+:[^/\\s@]+@"
         score: 0.9

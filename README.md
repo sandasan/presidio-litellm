@@ -142,8 +142,20 @@ curl http://localhost:4000/v1/chat/completions \
 ## Анонимизация
 
 - **Президио** (`presidio-server/app.py`) загружает кастомные распознаватели из
-  `presidio_config.yaml` (сущности `SECRET_KEY`, `DB_CONNECTION`, `INTERNAL_IP`
-  поверх стандартных `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `CREDIT_CARD` и т.д.).
+  `presidio_config.yaml` поверх стандартных сущностей
+  (`PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `CREDIT_CARD` и т.д.):
+  - `SECRET_KEY` — API-ключи/токены (`sk-*`, `AIza*`, `xai-*`, `gsk_*`,
+    Bearer, `PRIVATE KEY`), JWT, `ghp_*/github_pat_*`, `npm_*`, `xox*` (Slack),
+    `sk_/pk_` (Stripe), `AKIA` (AWS), telegram, basic-auth в URL;
+  - `DB_CONNECTION` — строки подключения (postgres/mysql/mongodb/redis/…,
+    а также amqp/kafka/nats/clickhouse/snowflake/presto/trino);
+  - `INTERNAL_IP` — приватные IPv4 (`10.x`, `172.16–31.x`, `192.168.x`),
+    CGNAT `100.64–127.x`, loopback, link-local, приватные IPv6 (`fd00::/8`,
+    `fe80::`); 
+  - `INTERNAL_HOST` — внутренние домены и URL: `.internal`, `.corp`, `.local`,
+    `.lan`, `.intranet`, `.home`, `.docker`;
+  - `INTERNAL_PATH` — внутренние пути: `file://`, `smb://`, `nfs://`,
+    `cifs://`, `storage://` и UNC (`\\server\share`).
 - LiteLLM подключает Presidio через гардрейл `guardrails` в `config.yaml`
   (`guardrail: presidio`, `default_on: true`) и env-переменные
   `PRESIDIO_ANALYZER_API_BASE` / `PRESIDIO_ANONYMIZER_API_BASE` — срабатывает на
@@ -194,7 +206,7 @@ curl http://localhost:4000/v1/chat/completions \
 | Риск | Что происходит |
 |------|----------------|
 | Не-PII конфиденциальные данные | Анонимизация распознаёт **шаблоны**, а не семантику. Код, архитектура, бизнес-логика, внутренние названия — уходят провайдеру в открытом виде (если не занесены в `secrets_map.json`) |
-| Облачные провайдеры | Модели могут быть «учителем» или хранить запросы по своим политикам; это не внутри нашего контроля |
+| Облачные провайдеры | Модели могут быть «учителем» или хранить запросы по своим политикам; это не внутри нашего контроля. Стек предпочитает no-training провайдеров (см. «Провайдерская приватность»), но это заявленные ими политики, а не наша гарантия |
 | Vision/MCP-подзадачи Hermes | Мультимодальные задачи (vision/mcp) не переведены на наш канал (см. «Примечания»); egress lock отключает обращение к дефолтным эндпоинтам openrouter/nous |
 | Метаданные | Внешний IP хоста, тайминги и размеры запросов провайдеру видны в любом случае |
 | Симлинки внутри гранта | `filegate` пускает реально существующие пути и не «разглядывает» симлинки, ведущие за пределы гранта вне `/workspace` (в системные каталоги). Бэкап разрешённой директории не должен содержать ссылок на данные вне неё |
@@ -310,6 +322,53 @@ docker exec -e HERMES_GRANTS=presidio-litellm hermes-agent hermes-chat chat --pr
 docker exec -e HERMES_GRANTS=presidio-litellm hermes-agent hermes-chat --version
 # внутри гранта .env читается только как Permission denied, README.md доступен,
 # файлы других проектов — Permission denied
+```
+
+## Провайдерская приватность (no-training)
+
+Маскирование PII — наша работа, но **политика хранения и обучения** — работа
+провайдера. Стек сознательно отдаёт предпочтение провайдерам, которые
+**не используют запросы API для обучения**:
+
+- **Mistral** — публичная политика no-training на данных API (самый
+  надёжный для конфиденциальных запросов случай).
+- **Gemini** и **Groq** — данные API-сервисов по умолчанию не идут в обучение
+  моделей (это их официальные условия использования; условия могут меняться —
+  сверяйтесь с актуальными).
+- **OpenRouter** — это не модель, а роутер поверх апстримов: его провайдеры и
+  они сами могут обучаться на трафике, пока в настройках дашборда не выключен
+  флаг **Allow training**. В комбо `cloud-auto` модели OpenRouter имеют
+  минимальный вес и выбираются не в первую очередь.
+
+Что сделано в стеке:
+
+- `provision_omniroute.sh` создаёт/обновляет комбо `cloud-auto` с весами
+  приоритета: `mistral` 5, `gemini` 4, `groq` 3, `openrouter` 1. Порядок
+  применяется идемпотентно при каждом запуске (в т.ч. по весам — через PUT к
+  management API), так что уже существующее комбо тоже получит новые веса.
+- Переключите OpenRouter в режим без обучения вручную: на
+  [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) либо в
+  настройках использования/модели выключите **Allow training** для используемых
+  моделей (если такой флаг доступен). Это влияет на то, как трактуются
+  апстримы OpenRouter, и дополняет наш весовой приоритет.
+
+Гарантии остаются **заявлениями провайдеров**, а не нашего кода: стек
+снижает вероятность попадания данных к «более охотно учащимся» провайдерам,
+но полная уверенность для строгих требований NDA — локальная модель
+или провайдер с явным enterprise-контрактом (см. «Границы защиты»).
+
+Проверка (веса комбо):
+
+```bash
+JAR=$(mktemp)
+curl -sS -c "$JAR" -X POST http://127.0.0.1:20128/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"password":"<OMNIROUTE_INITIAL_PASSWORD>"}' >/dev/null
+curl -sS -b "$JAR" http://127.0.0.1:20128/api/combos | python3 -c "
+import sys, json
+c = next(x for x in json.load(sys.stdin)['combos'] if x['name'] == 'cloud-auto')
+print(*[(m['providerId'], m['weight']) for m in c['models']], sep='\n')"
+rm -f "$JAR"
 ```
 
 ## Чат в браузере (Open WebUI)
@@ -525,8 +584,10 @@ docker exec -e HERMES_BLOCK="$BLOCK" -e LD_PRELOAD=/usr/local/lib/filegate.so \
   - `OMNIROUTE_MEMORY_MB` — размер V8-кучи.
 - `provision_omniroute.sh`: идемпотентно логинится в management API, подключает
   провайдеров openrouter/gemini/groq/mistral из `.env` (когда коннекшна ещё нет)
-  и создаёт комбо `cloud-auto` (стратегия `auto`, только бесплатные модели).
-  Повторный запуск безопасен (пропускает уже созданное).
+  и создаёт комбо `cloud-auto` (стратегия `auto`, только бесплатные модели) —
+  с весами приоритета no-training провайдеров (mistral 5, gemini 4, groq 3,
+  openrouter 1; см. «Провайдерская приватность»). Если комбо уже существует —
+  обновляет веса через PUT. Повторный запуск безопасен.
 
 ### 4. LiteLLM-прокси и анонимизация
 

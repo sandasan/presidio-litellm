@@ -57,25 +57,40 @@ for p in openrouter gemini groq mistral; do
   fi
 done
 
+COMBO_PAYLOAD='{
+  "name": "cloud-auto",
+  "strategy": "auto",
+  "models": [
+    {"provider":"mistral","model":"mistral-small-latest","weight":5},
+    {"provider":"gemini","model":"gemini-flash-latest","weight":4},
+    {"provider":"groq","model":"qwen/qwen3.8-27b","weight":3},
+    {"provider":"groq","model":"openai/gpt-oss-120b","weight":3},
+    {"provider":"openrouter","model":"qwen/qwen3.8-27b:free","weight":1},
+    {"provider":"openrouter","model":"nvidia/nemotron-3.5-lightning:free","weight":1},
+    {"provider":"openrouter","model":"thinkingmachines/inkling:free","weight":1},
+    {"provider":"openrouter","model":"z-ai/glm-5.2:free","weight":1}
+  ]
+}'
+
+# Приоритет по приватности (см. README, «Провайдерская приватность»): вес выше
+# у no-training провайдеров — Mistral (политика no-training), затем Gemini и
+# Groq (не тренируются на API-трафике по умолчанию). У моделей OpenRouter вес
+# минимальный (1): их апстрим-провайдеры могут обучаться на трафике, пока в
+# дашборде OpenRouter не выключен «Allow training».
 if omniroute_get /api/combos | grep -q '"name":"cloud-auto"'; then
-  echo "✅ Комбо cloud-auto уже существует."
+  echo "ℹ️  Комбо cloud-auto уже существует — применяю веса приоритета..."
+  CID="$(omniroute_get /api/combos | python3 -c "import sys,json; print(next((c['id'] for c in json.load(sys.stdin)['combos'] if c['name']=='cloud-auto'),''))")"
+  if [ -n "$CID" ]; then
+    curl -sS -m 15 -b "$JAR" -X PUT "$OMNIROUTE_URL/api/combos/$CID" \
+      -H 'Content-Type: application/json' \
+      -d "$COMBO_PAYLOAD" | grep -q '"name":"cloud-auto"' \
+      && echo "✅ Веса комбо cloud-auto обновлены." \
+      || echo "⚠️ Не удалось обновить комбо cloud-auto (веса остались прежними)."
+  fi
 else
   if curl -sS -m 15 -b "$JAR" -X POST "$OMNIROUTE_URL/api/combos" \
        -H 'Content-Type: application/json' \
-       -d '{
-         "name": "cloud-auto",
-         "strategy": "auto",
-         "models": [
-           {"provider":"openrouter","model":"qwen/qwen3.8-27b:free"},
-           {"provider":"openrouter","model":"nvidia/nemotron-3.5-lightning:free"},
-           {"provider":"openrouter","model":"thinkingmachines/inkling:free"},
-           {"provider":"openrouter","model":"z-ai/glm-5.2:free"},
-           {"provider":"gemini","model":"gemini-flash-latest"},
-           {"provider":"groq","model":"qwen/qwen3.8-27b"},
-           {"provider":"groq","model":"openai/gpt-oss-120b"},
-           {"provider":"mistral","model":"mistral-small-latest"}
-         ]
-       }' | grep -q '"id"'; then
+       -d "$COMBO_PAYLOAD" | grep -q '"id"'; then
     echo "✅ Комбо cloud-auto создано."
   else
     echo "❌ Комбо cloud-auto: не удалось создать." >&2

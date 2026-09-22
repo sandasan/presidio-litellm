@@ -102,5 +102,26 @@ services:
       - litellm
     restart: unless-stopped
 
+  # Чат-интерфейс в браузере поверх LiteLLM: тот же маршрут cloud-sanitized-auto,
+  # та же анонимизация (Presidio-гардрейл) и де-анонимизация ответов. Это просто
+  # UI чата с моделями, а НЕ агент Hermes (без его инструментов/сессий).
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      # Прокидываем готовое подключение к LiteLLM: внутренний адрес в Docker-сети.
+      # Любой ключ подойдёт (у LiteLLM не настроены virtual keys) — используем тот
+      # же dummy, что и hermes-agent.
+      - OPENAI_API_BASE_URL=http://litellm:4000/v1
+      - OPENAI_API_KEY=sk-dummy
+    depends_on:
+      - litellm
+    restart: unless-stopped
+
 volumes:
   omniroute-data:
+  open-webui-data:

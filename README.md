@@ -4,6 +4,7 @@ Docker-стек для запуска агента Hermes с безопасны�
 
 ```
 Hermes Agent ──► LiteLLM Proxy ──► Presidio (анонимизация PII) ──► OmniRoute ──► провайдер ИИ
+Open WebUI ────►
 ```
 
 Все исходящие запросы к облачным моделям проходят через **Presidio**: персональные данные
@@ -24,6 +25,7 @@ Hermes Agent ──► LiteLLM Proxy ──► Presidio (анонимизаци�
 | `omniroute`  | Единый роутер по ИИ-моделям (350+ провайдеров, quota-aware фолбэк, лимиты бесплатных задач) |
 | `litellm`    | Прокси к OmniRoute. Применяет анонимизацию Presidio; при старте генерирует `litellm-proxy/config.yaml` |
 | `hermes-agent`| Агент Hermes (Nous Research), работает через LiteLLM как `custom`-провайдер     |
+| `open-webui` | Веб-чат в браузере (http://localhost:3000) поверх LiteLLM: тот же маршрут, та же анонимизация |
 
 ## Быстрый старт
 
@@ -99,7 +101,7 @@ python3 litellm-proxy/generate_config.py
 ничего не минует Presidio.
 
 ```
-Hermes / curl ──► LiteLLM (Presidio) ──► omniroute:20128 ──► провайдер
+Hermes / Open WebUI / curl ──► LiteLLM (Presidio) ──► omniroute:20128 ──► провайдер
 ```
 
 - Комбо `cloud-auto` (стратегия `auto`) создаётся автоматически при старте
@@ -155,6 +157,40 @@ curl http://localhost:4000/v1/chat/completions \
   input`) — ответ назад не пере-маскируется.
 - Проверка: `curl http://localhost:5001/health` → `{"status":"ok"}`.
 
+## Чат в браузере (Open WebUI)
+
+Вместо консольного Hermes можно общаться с теми же моделями через веб-чат
+**Open WebUI** — он поднимается в стеке автоматически.
+
+- Адрес: **http://localhost:3000** (внутри сети контейнеры ходят по
+  `http://open-webui:8080`).
+- Подключение к LiteLLM уже настроено через `OPENAI_API_BASE_URL`
+  (`http://litellm:4000/v1`) — все сообщения идут через тот же стек:
+  Presidio-гардрейл маскирует PII до отправки провайдеру, а ответ
+  де-анонимизируется к оригиналу (см. «Анонимизация»).
+- **Первый вход / регистрация**: откройте http://localhost:3000 — при первом
+  запуске Open WebUI покажет форму **Sign Up** (регистрация). На неё:
+
+  1. **Email** — любой на вид валидный, например `admin@example.com`.
+     Обратите внимание: Open WebUI отклоняет непохожие на настоящий e-mail
+     адреса (например `admin@local` вернёт ошибку про формат).
+     Письма никуда не отправляются, почта не проверяется.
+  2. **Name** — имя, отображаемое в интерфейсе (например, `admin`).
+  3. **Password** — придумайте пароль (и **Confirm Password** — повторите его).
+
+  После создания аккаунт **автоматически становится админом** (первый
+  пользователь всегда админ). Логин и пароль хранятся локально в томе
+  `open-webui-data`, в облако не уходят. На следующих запусках входите через
+  **Sign In** (страница логина) — форма регистрации больше показываться не будет.
+- В выпадашке модели выберите **`cloud-sanitized-auto`** — модели подтягиваются
+  из `/v1/models` LiteLLM.
+- История чатов и настройки лежат в томе `open-webui-data` (переживают
+  `docker compose up` / пересоздание контейнера).
+
+Важно: Open WebUI — это **чат-интерфейс, а не агент Hermes**. У него нет
+агентского цикла и инструментов Hermes (работа с файлами, шелл, сессии);
+это просто общение с моделями маршрута `cloud-sanitized-auto` через наш стек.
+
 ## Полезные проверки
 
 ```bash
@@ -162,6 +198,7 @@ curl http://localhost:4000/v1/chat/completions \
 curl http://localhost:5001/health          # presidio
 curl http://localhost:4000/health/liveliness  # litellm
 curl http://127.0.0.1:20128/v1/models     # omniroute (дашборд: http://127.0.0.1:20128)
+curl http://localhost:3000                # open-webui (чат)
 
 # какие маршруты попали в конфиг
 grep 'model:' litellm-proxy/config.yaml

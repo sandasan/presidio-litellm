@@ -32,7 +32,7 @@ fi
 echo "🔐 Провижининг OmniRoute (провайдеры из .env + комбо cloud-auto)..."
 "$PROJECT_DIR/provision_omniroute.sh"
 
-echo "🔄 Запуск остального стека (presidio + litellm + hermes-agent)..."
+echo "🔄 Запуск остального стека (presidio + litellm + hermes-agent + open-webui)..."
 # up без списка сервисов: создаёт/пересоздаёт все контейнеры, включая hermes-agent
 # (работает и с нуля на свежем клоне)
 docker compose -f "$COMPOSE_FILE" up -d --force-recreate
@@ -56,6 +56,10 @@ fi
 # поэтому к этому моменту gateway гарантированно готов
 curl -fsS -m 3 -o /dev/null http://127.0.0.1:20128/v1/models 2>/dev/null \
   && echo "✅ OmniRoute готов: дашборд http://127.0.0.1:20128"
+
+curl -fsS -m 3 -o /dev/null http://localhost:3000 2>/dev/null \
+  && echo "✅ Open WebUI готов: чат http://localhost:3000" \
+  || echo "ℹ️ Open WebUI разогревается: http://localhost:3000"
 
 echo "🤖 Запуск Hermes Agent (модель cloud-sanitized-auto через LiteLLM + Presidio)..."
 docker exec -it \

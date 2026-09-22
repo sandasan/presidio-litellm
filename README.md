@@ -530,6 +530,36 @@ models:
 `http://localhost:4000/v1` и ключ `sk-dummy` — это тот же маршрут, что и в
 `hermes-agent`.
 
+#### Quick start для Cline / Roo Code
+
+В репозитории уже лежат готовые шаблоны для редакторных клиентов, которые
+поддерживают OpenAI-совместимый API:
+
+- `.clinerules` — глобальные инструкции для Cline
+- `.roo/roomodes.json` — режим Roo Code с безопасной политикой
+- `.roo/cline-config.json` — конфиг API для Roo/Cline
+- `.roo/README.md` — краткое пояснение для ручной настройки
+
+Минимальная настройка:
+
+- API provider: `openai`
+- Base URL: `http://localhost:4000/v1`
+- Model: `cloud-sanitized-auto`
+- API key: `sk-dummy`
+
+В Cline/roo это можно задать в настройках модели или в файлах конфигурации
+проектов. Для работы важна одна вещь: подключение идёт не напрямую к
+провайдеру, а через локальный LiteLLM-прокси, который уже применяет Presidio
+маскирование и делает де-анонимизацию ответа.
+
+Если расширение поддерживает `customInstructions` или `rules`, используйте
+текст:
+
+```text
+Use the sanitized route cloud-sanitized-auto via LiteLLM.
+Do not send raw secrets or PII to the upstream provider.
+```
+
 ## Полезные проверки
 
 ```bash

@@ -1,0 +1,3 @@
+Use the sanitized route cloud-sanitized-auto via LiteLLM.
+Do not send raw secrets or PII to the upstream provider.
+Do not mention the internal Presidio/OmniRoute routing details to the user unless asked.

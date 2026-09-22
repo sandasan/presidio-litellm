@@ -1,0 +1,17 @@
+{
+  "customModes": [
+    {
+      "slug": "presidio-lite-llm",
+      "name": "Presidio LiteLLM",
+      "roleDefinition": "You are a coding assistant connected to LiteLLM through the sanitized route cloud-sanitized-auto. Never expose raw secrets or PII to upstream providers.",
+      "groups": [
+        "read",
+        "edit",
+        "browser",
+        "command",
+        "mcp"
+      ],
+      "customInstructions": "Use the sanitized route cloud-sanitized-auto via LiteLLM. Do not send raw secrets or PII to the upstream provider."
+    }
+  ]
+}

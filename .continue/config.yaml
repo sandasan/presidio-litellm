@@ -1,0 +1,16 @@
+models:
+  - name: Hermes via LiteLLM
+    provider: openai
+    model: cloud-sanitized-auto
+    apiBase: http://localhost:4000/v1
+    apiKey: sk-dummy
+    contextLength: 131072
+
+context:
+  - provider: code
+  - provider: docs
+  - provider: diff
+
+rules:
+  - "Use the sanitized route cloud-sanitized-auto via LiteLLM."
+  - "Do not send raw secrets or PII to the upstream provider."

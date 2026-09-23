@@ -16,6 +16,7 @@ set -euo pipefail
 WORKSPACE="${HERMES_WORKSPACE:-/workspace}"
 HERMES_BIN="${HERMES_AGENT_BIN:-/opt/venv/bin/hermes}"
 GRANTS_FILE="${HERMES_GRANTS_FILE:-$HOME/.hermes/grants.json}"
+SINGLE_PROJECT="${HERMES_SINGLE_PROJECT:-0}"
 FILEGATE_PY=/usr/local/bin/hermes-filegate.py
 GATE_SO=/usr/local/lib/filegate.so
 
@@ -74,7 +75,10 @@ pick_grants_default() {
 
 # 1. Гранты.
 GRANTS="${HERMES_GRANTS:-}"
-if [[ -z "$GRANTS" && -f "$GRANTS_FILE" ]]; then
+if [[ "$SINGLE_PROJECT" == "1" ]]; then
+    GRANTS="."
+fi
+if [[ "$SINGLE_PROJECT" != "1" && -z "$GRANTS" && -f "$GRANTS_FILE" ]]; then
     GRANTS="$(python3 -c 'import json,sys
 try:
     d=json.load(open(sys.argv[1]))
@@ -82,7 +86,7 @@ try:
 except Exception:
     print("")' "$GRANTS_FILE" || true)"
 fi
-if [[ -z "$GRANTS" ]]; then
+if [[ "$SINGLE_PROJECT" != "1" && -z "$GRANTS" ]]; then
     GRANTS="$(pick_grants_default)" || true
     if [[ -n "$GRANTS" ]]; then
         echo "hermes-chat: auto-grant: $GRANTS" >&2
@@ -106,7 +110,7 @@ echo "hermes-chat: гранты=[${GRANTS:-}] заблокировано зап�
 
 # 3. cwd = корень гранта, если он один.
 GRANT_ROOT="$WORKSPACE"
-if [[ -n "$GRANTS" && "$GRANTS" != *","* ]]; then
+if [[ -n "$GRANTS" && "$GRANTS" != "." && "$GRANTS" != *","* ]]; then
     GRANT_ROOT="$WORKSPACE/${GRANTS#/}"
     mkdir -p "$GRANT_ROOT"
 fi

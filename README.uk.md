@@ -84,6 +84,19 @@ docker exec -e HERMES_GRANTS=my-app hermes-agent hermes-chat \
 секції `volumes` сервісу `hermes-agent` у `docker-compose.yml`, а потім
 використовуйте назву змонтованого каталогу в `HERMES_GRANTS`.
 
+Для проєкту в будь-якому місці можна безпосередньо змонтувати його кореневий
+каталог:
+
+```bash
+./hermes-acp.sh "$(basename "$PWD")" "$PWD"
+```
+
+У цьому режимі проєкт доступний як `/workspace`, grant дорівнює `.`, а під час
+перемикання на іншу папку пересоздається лише контейнер Hermes. Завдання VS
+Code вже використовує цей режим через `${workspaceFolder}`. Для звичайного
+чату вкажіть у `.env` `PROJECTS_DIR=/абсолютний/шлях/до/проєкту` і використайте
+`HERMES_GRANTS=.`.
+
 ## Hermes у VS Code: ACP
 
 Hermes підтримує Agent Client Protocol (ACP) для інтеграції з редакторами.

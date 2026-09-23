@@ -131,10 +131,11 @@ def build_blocks(workspace, grants):
         top = sorted(os.listdir(workspace))
     except OSError:
         top = []
-    grant_set = {os.path.basename(g.rstrip("/")) for g in grants if g}
+    single_workspace = any(g in (".", "/") for g in grants)
+    grant_set = {os.path.basename(g.rstrip("/")) for g in grants if g and g not in (".", "/")}
     for name in top:
         full = os.path.join(workspace, name)
-        if name in grant_set:
+        if single_workspace or name in grant_set:
             continue
         if os.path.isdir(full) or os.path.islink(full):
             blocks.append(os.path.realpath(full) + "/")
@@ -142,7 +143,9 @@ def build_blocks(workspace, grants):
     # 2. Ignore-правила внутри каждого гранта.
     for grant in grants:
         grant = grant.strip("/")
-        if not grant:
+        if grant == ".":
+            grant = ""
+        if not grant and not single_workspace:
             continue
         root = os.path.realpath(os.path.join(workspace, grant))
         if not root.startswith(workspace.rstrip("/") + "/") and root != workspace:

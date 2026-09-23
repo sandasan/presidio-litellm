@@ -5,7 +5,7 @@
       "label": "Hermes ACP",
       "type": "shell",
       "command": "./hermes-acp.sh",
-      "args": ["${workspaceFolderBasename}"],
+      "args": ["${workspaceFolderBasename}", "${workspaceFolder}"],
       "options": {
         "cwd": "${workspaceFolder}"
       },

@@ -82,6 +82,18 @@ If the project is stored elsewhere, add its host directory to the
 `hermes-agent` service volumes in `docker-compose.yml`, then use the mounted
 name in `HERMES_GRANTS`.
 
+For a project anywhere on the host, mount its root directory directly:
+
+```bash
+./hermes-acp.sh "$(basename "$PWD")" "$PWD"
+```
+
+In this mode the project is available as `/workspace`, the grant is `.`, and
+switching to another folder recreates only the Hermes container. The VS Code
+task uses this mode automatically through `${workspaceFolder}`. For regular
+chat, set `PROJECTS_DIR=/absolute/path/to/project` in `.env` and use
+`HERMES_GRANTS=.`.
+
 ## Hermes in VS Code: ACP
 
 Hermes supports the Agent Client Protocol (ACP) for editor integrations.

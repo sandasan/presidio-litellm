@@ -22,6 +22,22 @@ else
   SINGLE_PROJECT=0
 fi
 
+if [[ "${1:-}" == "version" || "${1:-}" == "--version" ]]; then
+  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d --no-deps hermes-agent </dev/null >/dev/null 2>&1 || true
+  AGENT_CONTAINER="$(docker compose -f "$PROJECT_DIR/docker-compose.yml" ps -q hermes-agent)"
+  for _ in $(seq 1 30); do
+    if [[ -n "$AGENT_CONTAINER" ]] \
+      && [[ "$(docker inspect -f '{{.State.Status}}' "$AGENT_CONTAINER" 2>/dev/null || true)" == "running" ]] \
+      && docker exec "$AGENT_CONTAINER" /opt/venv/bin/hermes version >/dev/null 2>&1; then
+      exec docker exec "$AGENT_CONTAINER" /opt/venv/bin/hermes "$@"
+    fi
+    AGENT_CONTAINER="$(docker compose -f "$PROJECT_DIR/docker-compose.yml" ps -q hermes-agent)"
+    sleep 1
+  done
+  echo "Hermes ACP: hermes-agent is not ready." >&2
+  exit 1
+fi
+
 if ! curl -fsS -m 3 http://localhost:4000/health/liveliness >/dev/null 2>&1; then
   echo "Hermes ACP: LiteLLM is not ready; starting the stack..." >&2
   docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d </dev/null
@@ -39,19 +55,24 @@ if ! curl -fsS -m 3 http://localhost:4000/health/liveliness >/dev/null 2>&1; the
   exit 1
 fi
 
-# Ensure the agent container is running, then start Hermes in ACP mode. A direct
-# project mount must recreate the agent when switching between open folders.
-if [[ "$SINGLE_PROJECT" == "1" ]]; then
-  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d --no-deps --force-recreate hermes-agent </dev/null >/dev/null 2>&1
-else
-  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d --no-deps hermes-agent </dev/null >/dev/null 2>&1 || true
-fi
+# Ensure the agent container is running, then start Hermes in ACP mode. Avoid
+# recreating a live container here: the extension may connect immediately after
+# startup, and a forced recreate can drop the first ACP response.
+docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d --no-deps hermes-agent </dev/null >/dev/null 2>&1 || true
+AGENT_CONTAINER="$(docker compose -f "$PROJECT_DIR/docker-compose.yml" ps -q hermes-agent)"
 
 for _ in $(seq 1 30); do
-  [[ "$(docker inspect -f '{{.State.Status}}' hermes-agent 2>/dev/null || true)" == "running" ]] && break
+  if [[ -n "$AGENT_CONTAINER" ]] \
+    && [[ "$(docker inspect -f '{{.State.Status}}' "$AGENT_CONTAINER" 2>/dev/null || true)" == "running" ]] \
+    && docker exec "$AGENT_CONTAINER" /opt/venv/bin/hermes version >/dev/null 2>&1; then
+    break
+  fi
+  AGENT_CONTAINER="$(docker compose -f "$PROJECT_DIR/docker-compose.yml" ps -q hermes-agent)"
   sleep 1
 done
-if [[ "$(docker inspect -f '{{.State.Status}}' hermes-agent 2>/dev/null || true)" != "running" ]]; then
+if [[ -z "$AGENT_CONTAINER" ]] \
+  || [[ "$(docker inspect -f '{{.State.Status}}' "$AGENT_CONTAINER" 2>/dev/null || true)" != "running" ]] \
+  || ! docker exec "$AGENT_CONTAINER" /opt/venv/bin/hermes version >/dev/null 2>&1; then
   echo "Hermes ACP: hermes-agent container is not running." >&2
   docker compose -f "$PROJECT_DIR/docker-compose.yml" logs --tail 50 hermes-agent </dev/null >&2
   exit 1
@@ -65,4 +86,4 @@ exec docker exec -i \
   -e HERMES_ACCEPT_HOOKS=1 \
   -e CUSTOM_BASE_URL=http://litellm:4000/v1 \
   -e CUSTOM_API_KEY=sk-dummy \
-  hermes-agent hermes acp --accept-hooks
+  "$AGENT_CONTAINER" hermes acp --accept-hooks

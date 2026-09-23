@@ -1,5 +1,7 @@
 {
-  "hermes.path": "hermes",
-  "hermes-chat.hermesPath": "hermes-acp",
+  "hermes.path": "/home/alexander/.local/bin/hermes-acp",
+  "hermes-chat.hermesPath": "/home/alexander/.local/bin/hermes-acp",
+  "hermes-chat.timeout": 60,
+  "hermes-chat.streamIdleTimeout": 180,
   "hermes-chat.autoApproveTools": false
 }

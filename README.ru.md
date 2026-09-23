@@ -1,5 +1,7 @@
 # presidio-litellm
 
+[Русский](README.ru.md) | [Українська](README.uk.md) | [English](README.en.md)
+
 Docker-стек для запуска агента Hermes с безопасным доступом к бесплатным ИИ-моделям:
 
 ```
@@ -349,7 +351,7 @@ docker exec -it \
 
 ```bash
 docker exec -e HERMES_GRANTS=presidio-litellm hermes-agent hermes-chat --version
-# внутри гранта .env читается только как Permission denied, README.md доступен,
+# внутри гранта .env читается только как Permission denied, README.ru.md доступен,
 # файлы других проектов — Permission denied
 ```
 
@@ -802,7 +804,9 @@ docker exec -e HERMES_BLOCK="$BLOCK" -e LD_PRELOAD=/usr/local/lib/filegate.so \
 │   ├── secrets_map.example.json # шаблон словаря литеральных секретов (копировать в secrets_map.json)
 │   └── custom_presidio.py       # не используется (работает встроенный гардрейл)
 ├── Dockerfile.hermes            # образ агента Hermes (собирает filegate.so)
-└── README.md
+├── README.ru.md                  # русская документация
+├── README.uk.md                  # українська документація
+└── README.en.md                  # English documentation
 ```
 
 ### 1. Каркас, ключи и `.gitignore`

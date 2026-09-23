@@ -307,6 +307,29 @@ docker exec -it hermes-agent hermes-chat chat --provider custom -m cloud-sanitiz
 docker exec -e HERMES_GRANTS=presidio-litellm hermes-agent hermes-chat chat --provider custom -m cloud-sanitized-auto
 ```
 
+#### Запуск для нужного проекта
+
+Проект должен находиться внутри каталога, который монтируется в контейнер
+(`/home/alexander/projects` на хосте). Например, для проекта
+`/home/alexander/projects/my-app`:
+
+```bash
+# из корня этого репозитория
+./update_models_and_run.sh
+
+# в другом терминале: дать агенту доступ только к my-app
+docker exec -it \
+  -e HERMES_GRANTS=my-app \
+  hermes-agent hermes-chat chat --provider custom -m cloud-sanitized-auto
+```
+
+Значение `HERMES_GRANTS` — это имя папки непосредственно внутри
+`/home/alexander/projects`, а внутри контейнера она доступна как
+`/workspace/my-app`. Для нескольких проектов укажите имена через запятую,
+например `HERMES_GRANTS=my-app,another-app`. Если проект находится в другом
+месте, добавьте его в секцию `volumes` сервиса `hermes-agent` в
+`docker-compose.yml` и используйте соответствующее имя каталога в гранте.
+
 Что делает `hermes-chat`:
 
 1. Собирает список **запрещённых путей** на старте (`hermes-filegate.py`):

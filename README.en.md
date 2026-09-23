@@ -158,7 +158,15 @@ export HERMES_GRANTS=my-app
 
 ## Routing and privacy
 
-The model route is `cloud-sanitized-auto`:
+LiteLLM exposes protected named routes:
+
+| Route                    | Provider                      | OmniRoute combo |
+|--------------------------|-------------------------------|-----------------|
+| `cloud-sanitized-auto`   | auto (agent pool, tool-calls) | `cloud-auto`    |
+| `cloud-sanitized-chat`   | auto (chat pool, wide free)   | `cloud-chat`    |
+| `cloud-sanitized-mistral`| Mistral                       | `cloud-mistral` |
+| `cloud-sanitized-gemini` | Gemini                        | `cloud-gemini`  |
+| `cloud-sanitized-groq`   | Groq                          | `cloud-groq`    |
 
 ```
 Hermes / Open WebUI -> LiteLLM (Presidio) -> OmniRoute -> provider
@@ -169,18 +177,48 @@ request receives a rate limit, timeout, or server error. LiteLLM applies the
 Presidio guardrail before forwarding the request. Responses are de-anonymized
 locally so Hermes can display the original values again.
 
-The `cloud-auto` combo uses Mistral and Gemini models. Cerebras is connected and
-health-checked as an optional candidate, then added only after billing and a
-successful tool-call probe are available. Groq remains connected for diagnostics
-and future short-context routes, but is excluded because its current TPM limits
-reject normal Hermes contexts. Unreliable OpenRouter free models are excluded
-because some stall during SSE or do not support tool calls. Re-run
-`./provision_omniroute.sh` after changing the combo definition.
+There are two independent pools with separate failover scopes:
 
-`refresh_omniroute_combo.py` can probe each target with a streaming tool call and
-refresh the combo only with targets that return tool calls and a terminal SSE
-event. Results are cached for five minutes after success and fifteen minutes
-after failure. If every target fails, the previous combo is kept. Run it once or
+- `cloud-auto` (agent) backs `cloud-sanitized-auto`. It keeps only models that
+  pass a streaming **tool-call** probe — Hermes needs tool calls and a large
+  context. Candidates: Mistral and Gemini (plus Cerebras once billing is active).
+- `cloud-chat` (chat) backs `cloud-sanitized-chat`. It accepts any model that
+  streams a plain completion — tool calls are NOT required. It therefore holds a
+  wider set of free models, including Groq (short chat contexts are fine) and
+  light Gemini/Mistral tiers.
+
+Because the pools are separate, exhausting agent quotas for tool-capable models
+does not break Open WebUI: the chat pool falls back to its own set of healthy
+free models. `refresh_omniroute_combo.py` probes each pool with its own criteria
+and updates the two combos independently. Groq is not part of `cloud-auto`
+(its current TPM limits reject normal Hermes contexts) — use the dedicated
+`cloud-sanitized-groq` route instead. Unreliable OpenRouter free models are
+probed too but usually drop out on SSE stalls, billing 401s, or rate limits.
+Provider combos `cloud-mistral`/`cloud-gemini`/`cloud-groq` pin a single provider
+while keeping the same Presidio guardrail. Re-run `./provision_omniroute.sh`
+after changing a combo definition.
+
+The default model for `update_models_and_run.sh` is set with `DEFAULT_MODEL` in
+`.env` (default `cloud-sanitized-auto`); override it by passing `-m <route>` to
+`hermes-chat`. The `auto` and `chat` routes always exist; provider routes appear
+in LiteLLM only when the matching key is present in `.env` (the route list is
+assembled in `docker-compose.yml` from the presence of `{PROVIDER}_API_KEY`; the
+keys themselves never reach the LiteLLM container). In Open WebUI, pick any
+route from the `/v1/models` dropdown — for ordinary conversation choose
+`cloud-sanitized-chat` so agent quota exhaustion does not affect it.
+
+Note: a provider-specific route does not fail over to other providers — when
+that provider's free-tier quota is exhausted, the request returns a rate-limit
+error (LiteLLM retries the same route). For maximum resilience use
+`cloud-sanitized-auto` (agent) and `cloud-sanitized-chat` (chat): each fails
+over inside its own pool.
+
+`refresh_omniroute_combo.py` probes targets per pool — the agent pool with a
+streaming tool call (requires a tool call plus a terminal SSE event), the chat
+pool with a plain streaming completion (requires assistant content; tool calls
+not needed). Each combo is updated only with models that passed its criteria.
+Results are cached for five minutes after success and fifteen minutes after
+failure. If every target fails, the previous combo is kept. Run it once or
 continuously:
 
 ```bash

@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """Генерация config.yaml для LiteLLM-прокси.
 
-Маршрутизация сведена к ОДНОМУ статичному пути: LiteLLM -> OmniRoute ->
-провайдер. Опрос облачных провайдеров и прямой shuffle в LiteLLM убраны как
-избыточные — те же провайдеры и ключи уже подключены в OmniRoute (провижининг
-`provision_omniroute.sh`), а OmniRoute сам выбирает модель, агрегирует квоты и
-фолбэчится между free-тирами.
+Маршрутизация сведена к статичным путям LiteLLM -> OmniRoute -> провайдер:
+основной `cloud-sanitized-auto` (комбо `cloud-auto` для агента Hermes — только
+модели с tool-calls), `cloud-sanitized-chat` (комбо `cloud-chat` для Open WebUI
+— без требований к tool-calls, широкий пул free-моделей) и именованные
+`cloud-sanitized-<provider>` (комбо `cloud-<provider>` для фиксированного
+провайдера). Исчерпание квот одним пулом не влияет на другой — это
+разделение и есть цель двух комбо. Опрос облачных провайдеров и прямой shuffle
+в LiteLLM убраны как избыточные — те же провайдеры и ключи уже подключены в
+OmniRoute (провижининг `provision_omniroute.sh`), а OmniRoute сам выбирает
+модель, агрегирует квоты и фолбэчится между free-тирами.
 
 Анонимизация при этом не страдает: пресidio-гардрейл из секции `guardrails`
 (`guardrail: presidio`, `default_on: true`) применяется ко ВСЕМ запросам LiteLLM,
-в т.ч. к единственному маршруту к OmniRoute — PII маскируется до выхода из
-прокси. Дополнительно включена де-анонимизация ответа (`output_parse_pii` +
+в т.ч. к каждому маршруту к OmniRoute — PII маскируется до выхода из прокси.
+Дополнительно включена де-анонимизация ответа (`output_parse_pii` +
 `presidio_filter_scope: input`): входящий запрос маскируется токенами
 `<PERSON_1>` и т.п., а ответ модели (и аргументы tool-call'ов) восстанавливаются
 к оригинальным значениям, чтобы Hermes и пользователь локально видели реальные
@@ -24,7 +29,32 @@ import os
 from typing import Sequence
 
 MODEL_NAME_AUTO = "cloud-sanitized-auto"
+MODEL_NAME_CHAT = "cloud-sanitized-chat"
 OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+
+# Именованные маршруты: auto (все провайдеры) + chat (чат-пул) + по одному на
+# провайдера. Список включаемых маршрутов передаётся переменной LITELLM_ROUTES
+# (например "auto,chat,mistral,gemini,groq"), которую docker-compose собирает из
+# .env-ключей. Контейнер litellm не получает сами ключи провайдеров — только имя
+# маршрута; комбо `cloud-<provider>` создаёт provision_omniroute.sh на хосте.
+# Пользователь выбирает модель через DEFAULT_MODEL в .env или при запуске
+# hermes-chat флагом -m.
+def build_routes() -> list[tuple[str, dict]]:
+    raw = os.environ.get("LITELLM_ROUTES", "auto").strip()
+    routes: list[tuple[str, dict]] = []
+    for item in raw.split(","):
+        name = item.strip()
+        if not name:
+            continue
+        if name == "auto":
+            route_name, combo = MODEL_NAME_AUTO, "cloud-auto"
+        elif name == "chat":
+            route_name, combo = MODEL_NAME_CHAT, "cloud-chat"
+        else:
+            route_name, combo = f"cloud-sanitized-{name}", f"cloud-{name}"
+        routes.append((route_name, omniroute_route(combo)))
+    return routes
+
 
 # --- Утилиты ----------------------------------------------------------------
 
@@ -33,13 +63,12 @@ def log(msg: str) -> None:
     print(f"[generate-config] {msg}", flush=True)
 
 
-def omniroute_route() -> dict:
-    """Единственный маршрут: LiteLLM -> OmniRoute -> провайдер.
+def omniroute_route(combo: str) -> dict:
+    """Маршрут LiteLLM -> OmniRoute (комбо `combo`) -> провайдер.
 
-    OmniRoute сам выбирает целевую модель (комбо `cloud-auto`, стратегия auto):
-    агрегирует квоты бесплатных моделей openrouter/gemini/groq/mistral, уходит с
-    исчерпавших лимит на живых и ретраит. Комбо создаётся скриптом
-    provision_omniroute.sh при первом запуске стека.
+    OmniRoute сам выбирает целевую модель (стратегия auto для комбо): агрегирует
+    квоты бесплатных моделей, уходит с исчерпавших лимит на живых и ретраит.
+    Комбо создаётся скриптом provision_omniroute.sh при первом запуске стека.
     Запросы приходят сюда уже деидентифицированными через Presidio (гардрейл в
     секции `guardrails` ниже), поэтому PII-защита сохраняется на всём пути,
     а ответ восстановливается к оригиналу через output_parse_pii.
@@ -52,7 +81,7 @@ def omniroute_route() -> dict:
     с достаточным окном (gemini-flash и т.п.).
     """
     return {
-        "model": "openai/cloud-auto",
+        "model": f"openai/{combo}",
         "api_base": "http://omniroute:20128/v1",
         "api_key": "os.environ/OMNIROUTE_API_KEY",
         "max_tokens": 4096,
@@ -87,9 +116,10 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
         [
             emit_models(routes),
             "",
-            # Один маршрут к OmniRoute: полный fallback уже внутри OmniRoute,
-            # поэтому на стороне LiteLLM оставляем лишь скромный ретрай на 429
-            # (все бесплатные квоты одновременно пусты) — иначе вернём 429 клиенту.
+            # Маршруты к OmniRoute: полный fallback уже внутри OmniRoute (в т.ч.
+            # между провайдерами в комбо), поэтому на стороне LiteLLM оставляем
+            # лишь скромный ретрай на 429 (все бесплатные квоты одновременно
+            # пусты) — иначе вернём 429 клиенту.
             "router_settings:",
             "  num_retries: 2",
             "  cooldown_time: 60",
@@ -116,7 +146,7 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
 
 
 def main() -> None:
-    routes: list[tuple[str, dict]] = [(MODEL_NAME_AUTO, omniroute_route())]
+    routes = build_routes()
 
     config_text = build_config(routes)
     with open(OUTPUT, "w") as f:

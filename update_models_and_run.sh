@@ -31,6 +31,9 @@ fi
 
 echo "🔐 Провижининг OmniRoute (провайдеры из .env + комбо cloud-auto)..."
 "$PROJECT_DIR/provision_omniroute.sh"
+echo "🩺 Проверка моделей cloud-auto (SSE + tool-call)..."
+python3 "$PROJECT_DIR/refresh_omniroute_combo.py" || \
+  echo "⚠️ Нет новых здоровых целей; сохраняем последнее рабочее комбо."
 
 echo "🔄 Запуск остального стека (presidio + litellm + hermes-agent + open-webui)..."
 # up без списка сервисов: создаёт/пересоздаёт все контейнеры, включая hermes-agent

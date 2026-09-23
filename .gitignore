@@ -24,3 +24,4 @@ logs/
 # Сгенерированные конфиги
 litellm-proxy/config.yaml
 litellm-proxy/config.json
+.omniroute-health.json

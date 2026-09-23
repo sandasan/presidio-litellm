@@ -2,7 +2,7 @@
 # Идемпотентная настройка (провижининг) OmniRoute:
 #   1) логин в management API (пароль из OMNIROUTE_INITIAL_PASSWORD в .env,
 #      задаётся сервису omniroute как INITIAL_PASSWORD при первом старте);
-#   2) подключение провайдеров openrouter/gemini/groq/mistral из .env-ключей
+#   2) подключение провайдеров openrouter/gemini/groq/mistral/cerebras из .env-ключей
 #      (если коннекшн ещё не создан);
 #   3) создание комбо `cloud-auto` (стратегия auto, модели с пригодным SSE)
 #      — его использует маршрут cloud-sanitized-auto в LiteLLM.
@@ -35,7 +35,7 @@ if ! curl -sS -m 10 -c "$JAR" -X POST "$OMNIROUTE_URL/api/auth/login" \
 fi
 echo "✅ Авторизован."
 
-for p in openrouter gemini groq mistral; do
+for p in openrouter gemini groq mistral cerebras; do
   key_var="${p^^}_API_KEY"
   key="${!key_var:-}"
   if [ -z "$key" ]; then
@@ -62,10 +62,7 @@ COMBO_PAYLOAD='{
   "strategy": "auto",
   "models": [
     {"provider":"mistral","model":"mistral-small-latest","weight":5},
-    {"provider":"gemini","model":"gemini-flash-latest","weight":4},
-    {"provider":"openrouter","model":"qwen/qwen3.8-27b:free","weight":1},
-    {"provider":"openrouter","model":"nvidia/nemotron-3.5-lightning:free","weight":1},
-    {"provider":"openrouter","model":"z-ai/glm-5.2:free","weight":1}
+    {"provider":"gemini","model":"gemini-flash-latest","weight":4}
   ]
 }'
 

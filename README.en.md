@@ -169,12 +169,24 @@ request receives a rate limit, timeout, or server error. LiteLLM applies the
 Presidio guardrail before forwarding the request. Responses are de-anonymized
 locally so Hermes can display the original values again.
 
-The `cloud-auto` combo uses Mistral, Gemini, and OpenRouter free models. Groq is
-connected for management and future routes but is intentionally excluded from
-this combo because its current TPM limits can reject Hermes-sized contexts
-before an SSE stream starts. The provisioning script also excludes OpenRouter
-models that require an agentic harness. Re-run `./provision_omniroute.sh` after
-changing the combo definition.
+The `cloud-auto` combo uses Mistral and Gemini models. Cerebras is connected and
+health-checked as an optional candidate, then added only after billing and a
+successful tool-call probe are available. Groq remains connected for diagnostics
+and future short-context routes, but is excluded because its current TPM limits
+reject normal Hermes contexts. Unreliable OpenRouter free models are excluded
+because some stall during SSE or do not support tool calls. Re-run
+`./provision_omniroute.sh` after changing the combo definition.
+
+`refresh_omniroute_combo.py` can probe each target with a streaming tool call and
+refresh the combo only with targets that return tool calls and a terminal SSE
+event. Results are cached for five minutes after success and fifteen minutes
+after failure. If every target fails, the previous combo is kept. Run it once or
+continuously:
+
+```bash
+python3 refresh_omniroute_combo.py
+python3 refresh_omniroute_combo.py --loop --interval 300
+```
 
 The agent container has an egress lock. Requests to the internal stack services
 are allowed, while arbitrary external HTTP(S) requests from the agent are

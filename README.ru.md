@@ -534,9 +534,15 @@ docker exec -it \
 
 ```bash
 # в терминале VS Code
-./hermes-acp.sh
+./hermes-acp.sh "$(basename "$PWD")"
 # или Terminal -> Run Task -> Hermes ACP
 ```
+
+Задача `Hermes ACP` в `.vscode/tasks.json` передаёт имя текущей открытой папки
+через `${workspaceFolderBasename}`. Перед запуском ACP она проверяет
+`http://localhost:4000/health/liveliness`; если стек не запущен, выполняет
+`docker compose up -d` и ждёт готовности LiteLLM. Поэтому задачу можно запускать
+из открытого проекта, если его папка находится внутри `PROJECTS_DIR`.
 
 Внутри контейнера используется тот же защищённый маршрут:
 `HERMES_GRANTS=<project-name>` + `CUSTOM_BASE_URL=http://litellm:4000/v1` +

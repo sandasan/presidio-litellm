@@ -100,6 +100,13 @@ docker exec hermes-agent hermes acp --check
 HERMES_GRANTS=my-app ./hermes-acp.sh
 ```
 
+Завдання `Hermes ACP` у `.vscode/tasks.json` передає назву поточної відкритої
+папки через `${workspaceFolderBasename}`. Перед запуском ACP воно перевіряє
+`http://localhost:4000/health/liveliness`; якщо стек не запущений, виконує
+`docker compose up -d` і чекає на готовність LiteLLM. Тому завдання можна
+запускати з відкритого проєкту, якщо його папка знаходиться всередині
+`PROJECTS_DIR`.
+
 Обгортка запускає Hermes через захищений маршрут LiteLLM і передає
 `HERMES_GRANTS` у контейнер. Цю саму команду можна налаштувати як команду
 stdio у розширенні VS Code із підтримкою ACP. У репозиторії також є завдання

@@ -115,7 +115,7 @@ VS Code. Обидва розширення використовують кома
 
 ```json
 {
-  "hermes.path": "hermes-acp",
+  "hermes.path": "hermes",
   "hermes-chat.hermesPath": "hermes-acp",
   "hermes-chat.autoApproveTools": false
 }
@@ -138,12 +138,10 @@ docker exec hermes-agent hermes acp --check
 HERMES_GRANTS=my-app ./hermes-acp.sh
 ```
 
-Завдання `Hermes ACP` у `.vscode/tasks.json` передає назву поточної відкритої
-папки через `${workspaceFolderBasename}`. Перед запуском ACP воно перевіряє
-`http://localhost:4000/health/liveliness`; якщо стек не запущений, виконує
-`docker compose up -d` і чекає на готовність LiteLLM. Тому завдання можна
-запускати з відкритого проєкту, якщо його папка знаходиться всередині
-`PROJECTS_DIR`.
+Розширення самостійно запускає `hermes-acp acp` і використовує поточну
+відкриту папку. Не запускайте одночасно окреме ACP-завдання: воно створить
+друге ACP-з'єднання та може пересоздати контейнер Hermes під час роботи
+розширення.
 
 Обгортка запускає Hermes через захищений маршрут LiteLLM і передає
 `HERMES_GRANTS` у контейнер. Цю саму команду можна налаштувати як команду

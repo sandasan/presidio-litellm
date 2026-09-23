@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+PROJECT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 GRANT="${HERMES_GRANTS:-${1:-$(basename "$PROJECT_DIR")}}"
 TARGET_DIR="${2:-}"
 
@@ -23,7 +24,7 @@ fi
 
 if ! curl -fsS -m 3 http://localhost:4000/health/liveliness >/dev/null 2>&1; then
   echo "Hermes ACP: LiteLLM is not ready; starting the stack..." >&2
-  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d
+  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d </dev/null
   for _ in $(seq 1 120); do
     if curl -fsS -m 3 http://localhost:4000/health/liveliness >/dev/null 2>&1; then
       break
@@ -34,19 +35,31 @@ fi
 
 if ! curl -fsS -m 3 http://localhost:4000/health/liveliness >/dev/null 2>&1; then
   echo "Hermes ACP: LiteLLM did not become ready." >&2
-  docker compose -f "$PROJECT_DIR/docker-compose.yml" logs --tail 50 litellm >&2
+  docker compose -f "$PROJECT_DIR/docker-compose.yml" logs --tail 50 litellm </dev/null >&2
   exit 1
 fi
 
 # Ensure the agent container is running, then start Hermes in ACP mode. A direct
 # project mount must recreate the agent when switching between open folders.
 if [[ "$SINGLE_PROJECT" == "1" ]]; then
-  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d --no-deps --force-recreate hermes-agent >/dev/null 2>&1
+  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d --no-deps --force-recreate hermes-agent </dev/null >/dev/null 2>&1
 else
-  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d --no-deps hermes-agent >/dev/null 2>&1 || true
+  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d --no-deps hermes-agent </dev/null >/dev/null 2>&1 || true
 fi
 
-exec docker exec -it \
+for _ in $(seq 1 30); do
+  [[ "$(docker inspect -f '{{.State.Status}}' hermes-agent 2>/dev/null || true)" == "running" ]] && break
+  sleep 1
+done
+if [[ "$(docker inspect -f '{{.State.Status}}' hermes-agent 2>/dev/null || true)" != "running" ]]; then
+  echo "Hermes ACP: hermes-agent container is not running." >&2
+  docker compose -f "$PROJECT_DIR/docker-compose.yml" logs --tail 50 hermes-agent </dev/null >&2
+  exit 1
+fi
+
+# ACP is a JSON-RPC stdio protocol; never allocate a pseudo-TTY here, even when
+# the wrapper is launched from the VS Code task terminal.
+exec docker exec -i \
   -e HERMES_GRANTS="$GRANT" \
   -e HERMES_SINGLE_PROJECT="$SINGLE_PROJECT" \
   -e HERMES_ACCEPT_HOOKS=1 \

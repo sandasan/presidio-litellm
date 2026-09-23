@@ -111,7 +111,7 @@ personal absolute path. The repository settings already contain:
 
 ```json
 {
-  "hermes.path": "hermes-acp",
+  "hermes.path": "hermes",
   "hermes-chat.hermesPath": "hermes-acp",
   "hermes-chat.autoApproveTools": false
 }
@@ -134,11 +134,9 @@ Start the bundled ACP wrapper from the repository root:
 HERMES_GRANTS=my-app ./hermes-acp.sh
 ```
 
-The `Hermes ACP` task in `.vscode/tasks.json` passes the current folder name via
-`${workspaceFolderBasename}`. Before starting ACP it checks
-`http://localhost:4000/health/liveliness`; if the stack is not running, it runs
-`docker compose up -d` and waits for LiteLLM. The task can therefore be started
-from the open project as long as that project is inside `PROJECTS_DIR`.
+The wrapper checks `http://localhost:4000/health/liveliness`; if the stack is not
+running, it runs `docker compose up -d` and waits for LiteLLM. Do not run a
+second ACP task at the same time: the extension itself owns the ACP process.
 
 The wrapper starts Hermes with the protected LiteLLM route and passes
 `HERMES_GRANTS` to the container. The same command can be configured as the

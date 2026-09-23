@@ -495,7 +495,7 @@ docker exec -it hermes-agent hermes-chat chat --provider custom -m cloud-sanitiz
 
 ```json
 {
-  "hermes.path": "hermes-acp",
+  "hermes.path": "hermes",
   "hermes-chat.hermesPath": "hermes-acp",
   "hermes-chat.autoApproveTools": false
 }
@@ -564,21 +564,20 @@ docker exec -it \
 Для этого репозитория уже добавлены готовые файлы запуска:
 
 - `hermes-acp.sh` — обёртка над `docker exec ... hermes acp --accept-hooks`
-- `.vscode/tasks.json` — задача VS Code `Hermes ACP`
+- `.vscode/tasks.json` — задача VS Code `Hermes Stack` для запуска Docker-стека
 
 Запуск из VS Code:
 
 ```bash
 # в терминале VS Code
 ./hermes-acp.sh "$(basename "$PWD")"
-# или Terminal -> Run Task -> Hermes ACP
+# или Terminal -> Run Task -> Hermes Stack
 ```
 
-Задача `Hermes ACP` в `.vscode/tasks.json` передаёт имя текущей открытой папки
-через `${workspaceFolderBasename}`. Перед запуском ACP она проверяет
-`http://localhost:4000/health/liveliness`; если стек не запущен, выполняет
-`docker compose up -d` и ждёт готовности LiteLLM. Поэтому задачу можно запускать
-из открытого проекта, если его папка находится внутри `PROJECTS_DIR`.
+Расширение само запускает `hermes-acp acp` и использует текущую открытую папку.
+Задача `Hermes Stack` предназначена только для ручного запуска Docker-стека.
+Не запускайте одновременно отдельный ACP task: он создаёт второе ACP-соединение
+и может пересоздать контейнер Hermes во время работы расширения.
 
 Внутри контейнера используется тот же защищённый маршрут:
 `HERMES_GRANTS=<project-name>` + `CUSTOM_BASE_URL=http://litellm:4000/v1` +
@@ -597,7 +596,7 @@ docker exec -it \
    ```bash
    ./hermes-acp.sh
    ```
-   или через VS Code task: `Terminal → Run Task → Hermes ACP`.
+  или через VS Code task `Terminal → Run Task → Hermes Stack` для запуска только стека.
 3. В клиенте ACP выберите сервер со стандартным вводом/выводом или командой:
    ```bash
    docker exec -i hermes-agent hermes acp

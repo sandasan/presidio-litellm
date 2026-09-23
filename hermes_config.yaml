@@ -1,4 +1,14 @@
-model: cloud-sanitized-auto
+model:
+  default: cloud-sanitized-auto
+  context_length: 131072
+  provider: custom
+  base_url: http://litellm:4000/v1
+  api_mode: chat_completions
+providers:
+  custom:
+    api: http://litellm:4000/v1
+    name: custom
+    api_key: sk-dummy
 auxiliary:
   title_generation:
     provider: custom

@@ -163,6 +163,13 @@ request receives a rate limit, timeout, or server error. LiteLLM applies the
 Presidio guardrail before forwarding the request. Responses are de-anonymized
 locally so Hermes can display the original values again.
 
+The `cloud-auto` combo uses Mistral, Gemini, and OpenRouter free models. Groq is
+connected for management and future routes but is intentionally excluded from
+this combo because its current TPM limits can reject Hermes-sized contexts
+before an SSE stream starts. The provisioning script also excludes OpenRouter
+models that require an agentic harness. Re-run `./provision_omniroute.sh` after
+changing the combo definition.
+
 The agent container has an egress lock. Requests to the internal stack services
 are allowed, while arbitrary external HTTP(S) requests from the agent are
 blocked. Browser and direct web-surfing features therefore do not work by

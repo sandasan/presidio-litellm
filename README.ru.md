@@ -64,9 +64,11 @@ Open WebUI ────►
 `cloud-sanitized-auto` → OmniRoute (комбо `cloud-auto`). Модели выбирает OmniRoute:
 
 1. Провижининг `provision_omniroute.sh` подключает в OmniRoute провайдеров
-   **OpenRouter**, **Gemini**, **Groq**, **Mistral** из `.env-ключей` (или OmniRoute
-   сам регистрирует их по env-паттерну `{PROVIDER_ID}_API_KEY`) и создаёт комбо
-   `cloud-auto`.
+  **OpenRouter**, **Gemini**, **Groq**, **Mistral** из `.env-ключей` (или OmniRoute
+  сам регистрирует их по env-паттерну `{PROVIDER_ID}_API_KEY`) и создаёт комбо
+  `cloud-auto` из моделей Mistral, Gemini и OpenRouter. Groq подключён, но
+  исключён из этого комбо: его текущие TPM-лимиты могут отклонить большой
+  контекст Hermes ещё до начала SSE-потока.
 2. В комбо входят только бесплатные модели; OmniRoute реалтайм-скорит их
    (здоровье, квота, латентность, цена) и выбирает целевую модель на запрос.
 3. LiteLLM применяет к запросу анонимизацию Presidio и передаёт его в OmniRoute —
@@ -387,9 +389,12 @@ docker exec -e HERMES_GRANTS=presidio-litellm hermes-agent hermes-chat --version
 Что сделано в стеке:
 
 - `provision_omniroute.sh` создаёт/обновляет комбо `cloud-auto` с весами
-  приоритета: `mistral` 5, `gemini` 4, `groq` 3, `openrouter` 1. Порядок
-  применяется идемпотентно при каждом запуске (в т.ч. по весам — через PUT к
-  management API), так что уже существующее комбо тоже получит новые веса.
+  приоритета: `mistral` 5, `gemini` 4, `openrouter` 1. Groq подключён для
+  управления и будущих маршрутов, но исключён из этого комбо: его текущие
+  TPM-лимиты могут отклонять большие контексты Hermes ещё до начала SSE-потока.
+  Порядок применяется идемпотентно при каждом запуске (в т.ч. по весам — через
+  PUT к management API), так что уже существующее комбо тоже получит новые
+  веса.
 - Переключите OpenRouter в режим без обучения вручную: на
   [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) либо в
   настройках использования/модели выключите **Allow training** для используемых
@@ -887,9 +892,11 @@ docker exec -e HERMES_BLOCK="$BLOCK" -e LD_PRELOAD=/usr/local/lib/filegate.so \
 - `provision_omniroute.sh`: идемпотентно логинится в management API, подключает
   провайдеров openrouter/gemini/groq/mistral из `.env` (когда коннекшна ещё нет)
   и создаёт комбо `cloud-auto` (стратегия `auto`, только бесплатные модели) —
-  с весами приоритета no-training провайдеров (mistral 5, gemini 4, groq 3,
-  openrouter 1; см. «Провайдерская приватность»). Если комбо уже существует —
-  обновляет веса через PUT. Повторный запуск безопасен.
+  с весами приоритета no-training провайдеров (mistral 5, gemini 4,
+  openrouter 1; см. «Провайдерская приватность»). Groq остаётся подключённым
+  для управления и будущих маршрутов, но исключён из этого комбо из-за TPM-
+  лимитов. Если комбо уже существует — обновляет веса через PUT. Повторный
+  запуск безопасен.
 
 ### 4. LiteLLM-прокси и анонимизация
 

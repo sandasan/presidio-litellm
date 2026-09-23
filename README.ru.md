@@ -285,8 +285,9 @@ docker exec hermes-agent curl -m 5 -sS -o /dev/null https://example.com 2>&1    
 
 ### Разрешения на каталоги (гранты + ignore-файлы)
 
-Контейнер монтирует `/home/alexander/projects` в `/workspace` целиком, но агент
-видит только то, на что получил **грант**. Запускайте агента через обёртку
+Контейнер монтирует каталог из `PROJECTS_DIR` (по умолчанию
+`/home/alexander/projects`) в `/workspace` целиком, но агент видит только то,
+на что получил **грант**. Запускайте агента через обёртку
 (не напрямую `hermes`):
 
 ```bash
@@ -312,7 +313,7 @@ docker exec -e HERMES_GRANTS=presidio-litellm hermes-agent hermes-chat chat --pr
 #### Запуск для нужного проекта
 
 Проект должен находиться внутри каталога, который монтируется в контейнер
-(`/home/alexander/projects` на хосте). Например, для проекта
+(`PROJECTS_DIR` на хосте, по умолчанию `/home/alexander/projects`). Например, для проекта
 `/home/alexander/projects/my-app`:
 
 ```bash

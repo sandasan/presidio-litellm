@@ -39,11 +39,13 @@ internal IP addresses are masked before the request reaches a provider.
 
 ## Run Hermes for a specific project
 
-The container mounts `/home/alexander/projects` on the host as `/workspace`.
+The container mounts the `PROJECTS_DIR` host directory as `/workspace`
+(`PROJECTS_DIR` defaults to `/home/alexander/projects`). Set it in `.env` when
+your projects are stored elsewhere.
 The value of `HERMES_GRANTS` is the name of a directory directly inside that
 host directory.
 
-For `/home/alexander/projects/my-app`, grant access only to that project:
+For a project at `/home/alexander/projects/my-app`, grant access only to that project:
 
 ```bash
 # Start the stack from this repository

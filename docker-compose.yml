@@ -88,7 +88,8 @@ services:
     container_name: hermes-agent
     volumes:
       # Монтируем ваши проекты, чтобы агент мог работать с вашими файлами
-      - /home/alexander/projects:/workspace
+      # Set PROJECTS_DIR in .env to the host directory containing your projects.
+      - ${PROJECTS_DIR:-/home/alexander/projects}:/workspace
       # Стабильный конфиг Hermes (модель + aux-задачи через LiteLLM/Presidio)
       - ./hermes_config.yaml:/root/.hermes/config.yaml
       # Управление доступом к каталогам: обёртка запуска, вычислитель блок-листа

@@ -1,5 +1,7 @@
 # Секреты
 .env
+.env.*
+!.env.example
 # Словарь точных значений секретов для LiteralSecretMasker
 litellm-proxy/secrets_map.json
 

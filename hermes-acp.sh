@@ -23,7 +23,7 @@ else
 fi
 
 if [[ "${1:-}" == "version" || "${1:-}" == "--version" ]]; then
-  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d --no-deps hermes-agent </dev/null >/dev/null 2>&1 || true
+  "$PROJECT_DIR/ensure-stack.sh" </dev/null >/dev/null 2>&1 || true
   AGENT_CONTAINER="$(docker compose -f "$PROJECT_DIR/docker-compose.yml" ps -q hermes-agent)"
   for _ in $(seq 1 30); do
     if [[ -n "$AGENT_CONTAINER" ]] \
@@ -38,9 +38,9 @@ if [[ "${1:-}" == "version" || "${1:-}" == "--version" ]]; then
   exit 1
 fi
 
+"$PROJECT_DIR/ensure-stack.sh" </dev/null
 if ! curl -fsS -m 3 http://localhost:4000/health/liveliness >/dev/null 2>&1; then
-  echo "Hermes ACP: LiteLLM is not ready; starting the stack..." >&2
-  docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d </dev/null
+  echo "Hermes ACP: LiteLLM is not ready; waiting for the stack..." >&2
   for _ in $(seq 1 120); do
     if curl -fsS -m 3 http://localhost:4000/health/liveliness >/dev/null 2>&1; then
       break
@@ -55,10 +55,8 @@ if ! curl -fsS -m 3 http://localhost:4000/health/liveliness >/dev/null 2>&1; the
   exit 1
 fi
 
-# Ensure the agent container is running, then start Hermes in ACP mode. Avoid
-# recreating a live container here: the extension may connect immediately after
-# startup, and a forced recreate can drop the first ACP response.
-docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d --no-deps hermes-agent </dev/null >/dev/null 2>&1 || true
+# The shared check above also covers hermes-agent without recreating a live
+# container: a forced recreate can drop the first ACP response.
 AGENT_CONTAINER="$(docker compose -f "$PROJECT_DIR/docker-compose.yml" ps -q hermes-agent)"
 
 for _ in $(seq 1 30); do

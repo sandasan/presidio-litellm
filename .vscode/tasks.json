@@ -4,7 +4,7 @@
     {
       "label": "Hermes Stack",
       "type": "shell",
-      "command": "docker compose up -d",
+      "command": "${workspaceFolder}/ensure-stack.sh",
       "options": {
         "cwd": "${workspaceFolder}"
       },

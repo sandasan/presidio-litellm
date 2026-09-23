@@ -89,9 +89,10 @@ For a project anywhere on the host, mount its root directory directly:
 ```
 
 In this mode the project is available as `/workspace`, the grant is `.`, and
-switching to another folder recreates only the Hermes container. The VS Code
-task uses this mode automatically through `${workspaceFolder}`. For regular
-chat, set `PROJECTS_DIR=/absolute/path/to/project` in `.env` and use
+the wrapper ensures the stack is running without recreating already running
+containers. The VS Code task uses this mode automatically through
+`${workspaceFolder}`. For regular chat, set
+`PROJECTS_DIR=/absolute/path/to/project` in `.env` and use
 `HERMES_GRANTS=.`.
 
 ## Hermes in VS Code: ACP
@@ -118,8 +119,8 @@ personal absolute path. The repository settings already contain:
 ```
 
 When a folder is open, the extensions invoke `hermes-acp acp`. The wrapper uses
-the current VS Code workspace, mounts it as `/workspace`, starts the stack when
-needed, and recreates only the Hermes container.
+the current VS Code workspace, mounts it as `/workspace`, and delegates startup
+to `ensure-stack.sh`.
 
 After the stack is running and the ACP dependencies are installed in the
 Hermes image, check the installation:
@@ -134,9 +135,14 @@ Start the bundled ACP wrapper from the repository root:
 HERMES_GRANTS=my-app ./hermes-acp.sh
 ```
 
-The wrapper checks `http://localhost:4000/health/liveliness`; if the stack is not
-running, it runs `docker compose up -d` and waits for LiteLLM. Do not run a
-second ACP task at the same time: the extension itself owns the ACP process.
+The wrapper checks the state of every container through `ensure-stack.sh`. If
+the stack is already running, no Docker start command is executed, so switching
+between extension tabs does not restart Open WebUI or Hermes. Parallel starts
+are serialized with a lock. Do not run a second ACP task at the same time: the
+extension itself owns the ACP process.
+
+For image updates, use `update_models_and_run.sh` separately. It intentionally
+uses `--force-recreate` and can interrupt active sessions.
 
 The wrapper starts Hermes with the protected LiteLLM route and passes
 `HERMES_GRANTS` to the container. The same command can be configured as the

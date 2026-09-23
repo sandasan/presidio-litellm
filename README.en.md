@@ -97,6 +97,30 @@ chat, set `PROJECTS_DIR=/absolute/path/to/project` in `.env` and use
 ## Hermes in VS Code: ACP
 
 Hermes supports the Agent Client Protocol (ACP) for editor integrations.
+For `Poppywu124.hermes-chat` and `joaompfp.hermes-ai-agent`, install the
+portable wrapper once:
+
+```bash
+./install-hermes-vscode.sh
+```
+
+The script creates `~/.local/bin/hermes-acp` as a symlink to the repository
+wrapper. Add `~/.local/bin` to `PATH` if necessary, then restart VS Code. Both
+extensions use the command name `hermes-acp`, so users do not need to edit a
+personal absolute path. The repository settings already contain:
+
+```json
+{
+  "hermes.path": "hermes-acp",
+  "hermes-chat.hermesPath": "hermes-acp",
+  "hermes-chat.autoApproveTools": false
+}
+```
+
+When a folder is open, the extensions invoke `hermes-acp acp`. The wrapper uses
+the current VS Code workspace, mounts it as `/workspace`, starts the stack when
+needed, and recreates only the Hermes container.
+
 After the stack is running and the ACP dependencies are installed in the
 Hermes image, check the installation:
 

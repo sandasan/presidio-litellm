@@ -5,6 +5,13 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRANT="${HERMES_GRANTS:-${1:-$(basename "$PROJECT_DIR")}}"
 TARGET_DIR="${2:-}"
 
+# VS Code ACP extensions invoke the configured path as `hermes acp`.
+# Use their workspace cwd as the directly mounted project.
+if [[ "${1:-}" == "acp" ]]; then
+  TARGET_DIR="$PWD"
+  GRANT="$(basename "$TARGET_DIR")"
+fi
+
 if [[ -n "$TARGET_DIR" ]]; then
   TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
   export PROJECTS_DIR="$TARGET_DIR"

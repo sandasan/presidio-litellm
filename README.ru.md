@@ -481,6 +481,30 @@ docker exec -it hermes-agent hermes-chat chat --provider custom -m cloud-sanitiz
 (`hermes acp --help` → «editor integration (VS Code, Zed, JetBrains)»). Он
 даёт работу как у IDE-ассистента: видение файлов, diff, применение правок.
 
+Для расширений `Poppywu124.hermes-chat` и `joaompfp.hermes-ai-agent` один раз
+установите переносимую команду wrapper:
+
+```bash
+./install-hermes-vscode.sh
+```
+
+Скрипт создаёт ссылку `~/.local/bin/hermes-acp` на wrapper репозитория. После
+добавления `~/.local/bin` в `PATH` и перезапуска VS Code оба расширения используют
+эту команду без личных абсолютных путей. Настройки уже находятся в
+`.vscode/settings.json`:
+
+```json
+{
+  "hermes.path": "hermes-acp",
+  "hermes-chat.hermesPath": "hermes-acp",
+  "hermes-chat.autoApproveTools": false
+}
+```
+
+При открытии любой папки расширение запускает `hermes-acp acp`; wrapper берёт
+текущий VS Code workspace, монтирует его как `/workspace`, при необходимости
+поднимает стек и пересоздаёт только контейнер Hermes.
+
 Самый короткий рабочий вариант для этого проекта:
 
 ```bash
@@ -675,7 +699,7 @@ Do not send raw secrets or PII to the upstream provider.
 ### 1) Поднять стек
 
 ```bash
-cd /home/alexander/projects/presidio-litellm
+cd /path/to/presidio-litellm
 ./update_models_and_run.sh
 ```
 

@@ -100,6 +100,31 @@ Code вже використовує цей режим через `${workspaceFo
 ## Hermes у VS Code: ACP
 
 Hermes підтримує Agent Client Protocol (ACP) для інтеграції з редакторами.
+Для розширень `Poppywu124.hermes-chat` і `joaompfp.hermes-ai-agent` один раз
+встановіть переносиму обгортку:
+
+```bash
+./install-hermes-vscode.sh
+```
+
+Скрипт створює `~/.local/bin/hermes-acp` як символічне посилання на обгортку
+репозиторію. За потреби додайте `~/.local/bin` до `PATH`, а потім перезапустіть
+VS Code. Обидва розширення використовують команду `hermes-acp`, тому користувачу
+не потрібно змінювати особистий абсолютний шлях. У репозиторії вже є такі
+налаштування:
+
+```json
+{
+  "hermes.path": "hermes-acp",
+  "hermes-chat.hermesPath": "hermes-acp",
+  "hermes-chat.autoApproveTools": false
+}
+```
+
+Коли папка відкрита, розширення запускають `hermes-acp acp`. Обгортка бере
+поточний VS Code workspace, монтує його як `/workspace`, за потреби запускає
+стек і пересоздає лише контейнер Hermes.
+
 Після запуску стека та встановлення ACP-залежностей в образі Hermes перевірте
 встановлення:
 

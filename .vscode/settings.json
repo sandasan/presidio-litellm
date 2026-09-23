@@ -1,0 +1,5 @@
+{
+  "hermes.path": "hermes-acp",
+  "hermes-chat.hermesPath": "hermes-acp",
+  "hermes-chat.autoApproveTools": false
+}

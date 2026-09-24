@@ -17,6 +17,8 @@ RUN pip install --no-cache-dir \
 
 # 3. Запекание модели Spacy в образ
 RUN python -m spacy download en_core_web_lg
+RUN python -m spacy download ru_core_news_lg
+RUN python -m spacy download uk_core_news_lg
 
 # 4. Копирование кода
 COPY . .

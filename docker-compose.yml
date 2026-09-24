@@ -10,10 +10,23 @@ services:
       - ANALYZER_CONF_FILE=/app/presidio_config.yaml
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:5001/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 6
+      interval: 15s
+      timeout: 10s
+      retries: 4
+      start_period: 120s  # Даем контейнеру 2 минуты на спокойную загрузку моделей en, ru, uk
     restart: unless-stopped
+
+  # НОВЫЙ СЕРВИС: Наш прозрачный бридж для OpenCode
+  opencode-bridge:
+    image: python:3.11-slim
+    container_name: opencode-bridge
+    volumes:
+      - ./anonymizer_bridge.py:/app/anonymizer_bridge.py
+    command: python3 /app/anonymizer_bridge.py
+    network_mode: "host" # Позволяет скрипту прозрачно слушать 127.0.0.1:4001 хоста и видеть presidio на 5001
+    restart: unless-stopped
+    depends_on:
+      - presidio
 
   omniroute:
     image: diegosouzapw/omniroute:latest

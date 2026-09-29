@@ -354,6 +354,34 @@ def emit_models(routes: Sequence[tuple[str, dict]]) -> str:
         # ]
     # )
 
+# def build_config(routes: Sequence[tuple[str, dict]]) -> str:
+#     return "\n".join(
+#         [
+#             emit_models(routes),
+#             "",
+#             "router_settings:",
+#             "  num_retries: 2",
+#             "  cooldown_time: 60",
+#             "",
+#             "litellm_settings:",
+#             '  callbacks: ["custom_callbacks.proxy_handler_instance", "custom_callbacks.secret_masker_instance", "presidio"]',
+#             # КЛЮЧЕВЫЕ НАСТРОЙКИ ДЛЯ ПРЯМОГО ПРОБРОСА:
+#             "  allow_unsupported_deployments: true", # Разрешаем модели, которых нет в статичном списке
+#             "  fall_back_to_passthrough_filter_path: true", # Пропускаем неизвестные URL-пути вроде /responses дальше
+#             "",
+#             "guardrails:",
+#             "  - guardrail_name: presidio-anonymizer",
+#             "    litellm_params:",
+#             "      guardrail: presidio",
+#             "      mode: pre_call",
+#             "      default_on: true",
+#             "      output_parse_pii: true",
+#             "      presidio_filter_scope: input",
+#             "      presidio_language: \"en\"",
+#             "",
+#         ]
+#     )
+
 def build_config(routes: Sequence[tuple[str, dict]]) -> str:
     return "\n".join(
         [
@@ -364,20 +392,10 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
             "  cooldown_time: 60",
             "",
             "litellm_settings:",
-            '  callbacks: ["custom_callbacks.proxy_handler_instance", "custom_callbacks.secret_masker_instance", "presidio"]',
+            '  callbacks: ["custom_callbacks.proxy_handler_instance", "custom_callbacks.secret_masker_instance"]',
             # КЛЮЧЕВЫЕ НАСТРОЙКИ ДЛЯ ПРЯМОГО ПРОБРОСА:
             "  allow_unsupported_deployments: true", # Разрешаем модели, которых нет в статичном списке
             "  fall_back_to_passthrough_filter_path: true", # Пропускаем неизвестные URL-пути вроде /responses дальше
-            "",
-            "guardrails:",
-            "  - guardrail_name: presidio-anonymizer",
-            "    litellm_params:",
-            "      guardrail: presidio",
-            "      mode: pre_call",
-            "      default_on: true",
-            "      output_parse_pii: true",
-            "      presidio_filter_scope: input",
-            "      presidio_language: \"en\"",
             "",
         ]
     )

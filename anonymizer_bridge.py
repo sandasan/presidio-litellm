@@ -101,7 +101,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
 
                 while True:
-                    chunk = response.read(1024)
+                    chunk = response.read1(4096)
                     if not chunk:
                         break
                     try:
@@ -130,6 +130,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(str(e).encode('utf-8'))
 
 if __name__ == '__main__':
-    server = http.server.HTTPServer(('127.0.0.1', 4001), ProxyHandler)
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 4001), ProxyHandler)
     print("Финальный автономный SSL-бридж анонимайзера запущен на порту 4001...")
     server.serve_forever()

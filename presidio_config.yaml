@@ -1,5 +1,16 @@
 # presidio_config.yaml
 imports: []
+allow_list:
+  - Java
+  - PhpStorm
+  - IntelliJ
+  - IntelliJ IDEA
+  - IntelliJ IDEA Ultimate
+  - IntelliJ Platform
+  - IntelliJ Platform SDK
+  - JetBrains
+  - Gradle
+  - EspoCRM
 
 # Кастомные детекторы для кода и БД.
 # Каждому распознавателю обязательно задаётся supported_entity, чтобы

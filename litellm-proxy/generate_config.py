@@ -404,6 +404,7 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
             "      mode: pre_call",
             "      default_on: true",
             "      output_parse_pii: true",
+            "      presidio_filter_scope: input",
             "",
         ]
     )

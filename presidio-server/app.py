@@ -1,5 +1,6 @@
 import os
 import re
+import yaml
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -27,8 +28,12 @@ nlp_engine = provider.create_engine()
 # Передаем мультиязычный nlp_engine в анализатор Presidio
 analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en", "ru", "uk"])
 recognizer_config = os.getenv("ANALYZER_CONF_FILE")
+analyzer_allow_list = []
 if recognizer_config:
+    with open(recognizer_config, encoding="utf-8") as config_file:
+        recognizer_settings = yaml.safe_load(config_file) or {}
     analyzer.registry.add_recognizers_from_yaml(recognizer_config)
+    analyzer_allow_list = recognizer_settings.get("allow_list", [])
     print(f"Loaded custom recognizers from {recognizer_config}", flush=True)
 anonymizer = AnonymizerEngine()
 web_url_pattern = re.compile(r"(?i)\bhttps?://[^\s<>\"']+")
@@ -49,7 +54,12 @@ class AnonymizeRequest(BaseModel):
     analyzer_results: list[dict]
 
 def analyze_text(text: str, language: str, entities: list[str] | None = None):
-    results = analyzer.analyze(text=text, language=language, entities=entities)
+    results = analyzer.analyze(
+        text=text,
+        language=language,
+        entities=entities,
+        allow_list=analyzer_allow_list or None,
+    )
     url_spans = [match.span() for match in web_url_pattern.finditer(text)]
     other_entity_spans = [
         (result.start, result.end)

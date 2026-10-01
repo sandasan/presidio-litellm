@@ -397,6 +397,14 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
             "  allow_unsupported_deployments: true", # Разрешаем модели, которых нет в статичном списке
             "  fall_back_to_passthrough_filter_path: true", # Пропускаем неизвестные URL-пути вроде /responses дальше
             "",
+            "guardrails:",
+            "  - guardrail_name: presidio-anonymizer",
+            "    litellm_params:",
+            "      guardrail: presidio",
+            "      mode: pre_call",
+            "      default_on: true",
+            "      output_parse_pii: true",
+            "",
         ]
     )
 

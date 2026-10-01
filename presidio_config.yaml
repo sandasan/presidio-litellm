@@ -41,38 +41,35 @@ recognizers:
     supported_entity: "INTERNAL_IP"
     patterns:
       - name: "Private IPv4"
-        regex: "\\b(10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3})\\b"
+        regex: "(?<![/@:])\\b(10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3})\\b"
         score: 0.9
       - name: "CGNAT IPv4"
-        regex: "\\b100\\.(?:6[4-9]|[7-9]\\d)\\.\\d{1,3}\\.\\d{1,3}\\b"
+        regex: "(?<![/@:])\\b100\\.(?:6[4-9]|[7-9]\\d)\\.\\d{1,3}\\.\\d{1,3}\\b"
         score: 0.85
       - name: "Loopback IPv4"
-        regex: "\\b127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b"
+        regex: "(?<![/@:])\\b127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b"
         score: 0.9
       - name: "Link-local IPv4"
-        regex: "\\b169\\.254\\.\\d{1,3}\\.\\d{1,3}\\b"
+        regex: "(?<![/@:])\\b169\\.254\\.\\d{1,3}\\.\\d{1,3}\\b"
         score: 0.9
       - name: "Private IPv6 (ULA)"
-        regex: "\\bfd[0-9a-fA-F]{2}:[0-9a-fA-F:]+\\b"
+        regex: "(?<!/)(?<!@)(?<!\\[)\\bfd[0-9a-fA-F]{2}:[0-9a-fA-F:]+\\b"
         score: 0.9
       - name: "Link-local IPv6"
-        regex: "\\bfe80:[0-9a-fA-F:]+\\b"
+        regex: "(?<!/)(?<!@)(?<!\\[)\\bfe80:[0-9a-fA-F:]+\\b"
         score: 0.9
       - name: "Loopback IPv6"
-        regex: "\\b::1\\b"
+        regex: "(?<!/)(?<!@)(?<!\\[)\\b::1\\b"
         score: 0.9
 
   # 4. Внутренние хосты и домены: внутренние TLD (.internal, .corp, .local,
-  #    .lan, .intranet, .home, .docker) в чистом виде и в URL
+  #    .lan, .intranet, .home, .docker) в чистом виде
   - name: "InternalHostRecognizer"
     supported_language: "en"
     supported_entity: "INTERNAL_HOST"
     patterns:
       - name: "Internal FQDN"
-        regex: "\\b[a-zA-Z0-9](?:[a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?)+?\\.(?:internal|corp|local|lan|intranet|home|docker)\\b"
-        score: 0.9
-      - name: "Internal URL"
-        regex: "(?i)\\b(?:https?|git|ssh|ftp)://[a-zA-Z0-9._-]+\\.(?:internal|corp|local|lan|intranet|home|docker)(?::\\d{1,5})?(?:[/?#][^\\s<>\"']*)?"
+        regex: "(?<![/@:])\\b[a-zA-Z0-9](?:[a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?)+?\\.(?:internal|corp|local|lan|intranet|home|docker)\\b"
         score: 0.9
 
   # 5. Внутренние пути: file/smb/nfs-URI и UNC (Windows-шары)

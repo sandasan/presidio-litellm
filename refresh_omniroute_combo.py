@@ -40,6 +40,7 @@ PROBE_TIMEOUT = 30
 
 # Агентный пул: обязательны tool-calls и большой контекст.
 AGENT_CANDIDATES = [
+    {"provider": "mistral", "model": "ministral-8b-latest", "weight": 4},
     {"provider": "mistral", "model": "mistral-small-latest", "weight": 5},
     {"provider": "gemini", "model": "gemini-flash-latest", "weight": 4},
     {"provider": "cerebras", "model": "qwen-3.8-27b", "weight": 5},

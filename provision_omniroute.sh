@@ -4,8 +4,9 @@
 #      задаётся сервису omniroute как INITIAL_PASSWORD при первом старте);
 #   2) подключение провайдеров openrouter/gemini/groq/mistral/cerebras из .env-ключей
 #      (если коннекшн ещё не создан);
-#   3) создание комбо `cloud-auto` (стратегия auto, модели с пригодным SSE)
-#      — его использует маршрут cloud-sanitized-auto в LiteLLM.
+#   3) создание провайдерных комбо для ручного выбора маршрута.
+#      Пулы cloud-auto и cloud-chat создаёт refresh_omniroute_combo.py
+#      только из моделей, прошедших health-probe.
 # Повторный запуск безопасен: пропускает уже созданное.
 set -euo pipefail
 
@@ -85,48 +86,6 @@ upsert_combo() {
   fi
 }
 
-# cloud-auto: все свободные провайдеры. Приоритет по приватности (см. README,
-# «Провайдерская приватность»): вес выше у no-training провайдеров — Mistral
-# (политика no-training), затем Gemini и Groq (не тренируются на API-трафике по
-# умолчанию). У моделей OpenRouter вес минимальный (1): их апстрим-провайдеры
-# могут обучаться на трафике, пока в дашборде OpenRouter не выключен
-# «Allow training».
-#
-# Это АГЕНТНЫЙ пул (`cloud-sanitized-auto`): только модели с tool-calls и
-# устойчивым SSE — их требует Hermes. Чат-модели без tool-calls живут в
-# отдельном комбо cloud-chat (маршрут cloud-sanitized-chat).
-upsert_combo cloud-auto '{
-  "name": "cloud-auto",
-  "strategy": "auto",
-  "models": [
-    {"provider":"mistral","model":"mistral-small-latest","weight":5},
-    {"provider":"gemini","model":"gemini-flash-latest","weight":4}
-  ]
-}'
-
-# cloud-chat: ЧАТ-пул для Open WebUI (`cloud-sanitized-chat`). В отличие от
-# агентного пула, для чата НЕ обязательны tool-calls — уходят модели без них,
-# включая быстрые лайт-модели Gemini и Groq (TPM-лимиты Groq не страшны для
-# коротких чат-контекстов). Внимание: оба пула по умолчанию разделены, чтобы
-# исчерпание квот агентом не выбивало чат. Финальный состав корректирует
-# refresh_omniroute_combo.py (проверка здоровья), здесь — стартовый набор.
-upsert_combo cloud-chat '{
-  "name": "cloud-chat",
-  "strategy": "auto",
-  "models": [
-    {"provider":"mistral","model":"mistral-small-latest","weight":5},
-    {"provider":"gemini","model":"gemini-flash-latest","weight":4},
-    {"provider":"gemini","model":"gemini-flash-lite-latest","weight":3},
-    {"provider":"groq","model":"openai/gpt-oss-120b","weight":4},
-    {"provider":"groq","model":"openai/gpt-oss-20b","weight":3},
-    {"provider":"groq","model":"qwen/qwen3.8-27b","weight":2},
-    {"provider":"mistral","model":"ministral-8b-latest","weight":3},
-    {"provider":"openrouter","model":"qwen/qwen3.8-27b:free","weight":1},
-    {"provider":"openrouter","model":"z-ai/glm-5.2:free","weight":1},
-    {"provider":"openrouter","model":"nvidia/nemotron-3.5-lightning:free","weight":1}
-  ]
-}'
-
 # Именованные провайдерные комбо (для маршрутов LiteLLM cloud-sanitized-mistral/
 # gemini/groq): пользователь может жёстко выбрать конкретного провайдера вместо
 # auto. Создаются только для провайдеров, у которых задан ключ в .env. Анони-
@@ -154,4 +113,4 @@ upsert_combo cloud-chat '{
   ]
 }'
 
-echo "✅ OmniRoute готов к маршрутизации (провайдеры + комбо cloud-auto/cloud-chat/mistral/gemini/groq)."
+echo "✅ Провайдеры OmniRoute настроены; cloud-auto/cloud-chat будут собраны после health-probe."

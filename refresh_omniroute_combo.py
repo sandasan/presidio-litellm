@@ -180,6 +180,18 @@ class OmniRoute:
         else:
             self.request("POST", "/api/combos", payload)
 
+    def remove_combo(self, name: str) -> None:
+        combos = self.request("GET", "/api/combos").get("combos", [])
+        combo = next((item for item in combos if item.get("name") == name), None)
+        if combo:
+            request = Request(
+                f"{self.base_url}/api/combos/{combo['id']}",
+                headers={"Content-Type": "application/json"},
+                method="DELETE",
+            )
+            with self.opener.open(request, timeout=PROBE_TIMEOUT) as response:
+                response.read()
+
 
 def load_state() -> dict[str, dict[str, Any]]:
     try:
@@ -226,7 +238,12 @@ def run_pool(route: OmniRoute, state: dict[str, dict[str, Any]], combo: str,
             log(f"FAIL ({mode}): {key} ({reason})")
 
     if not active:
-        log(f"{combo}: no healthy models; keeping the existing combo")
+        try:
+            route.remove_combo(combo)
+        except (HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
+            log(f"{combo} could not be removed: {exc}")
+            return 1
+        log(f"{combo} removed: no healthy models")
         return 1
 
     try:

@@ -194,6 +194,9 @@ and updates the two combos independently. Groq is not part of `cloud-auto`
 (its current TPM limits reject normal Hermes contexts) — use the dedicated
 `cloud-sanitized-groq` route instead. Unreliable OpenRouter free models are
 probed too but usually drop out on SSE stalls, billing 401s, or rate limits.
+Provisioning does not seed `cloud-auto` or `cloud-chat` with unverified models:
+only probe-passing candidates are written, and a combo with no healthy
+candidates is removed.
 Provider combos `cloud-mistral`/`cloud-gemini`/`cloud-groq` pin a single provider
 while keeping the same Presidio guardrail. Re-run `./provision_omniroute.sh`
 after changing a combo definition.

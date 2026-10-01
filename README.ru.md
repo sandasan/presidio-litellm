@@ -61,7 +61,8 @@ Open WebUI ────►
 
    ```bash
    docker compose up -d omniroute          # сначала только gateway
-   ./provision_omniroute.sh                # ключи из .env + комбо cloud-auto
+    ./provision_omniroute.sh                # ключи из .env + провайдерные комбо
+    python3 refresh_omniroute_combo.py      # проверка и создание cloud-auto/chat
    docker compose up -d --build            # остальной стек
    docker exec -e CUSTOM_BASE_URL=http://litellm:4000/v1 -e CUSTOM_API_KEY=sk-dummy \
      hermes-agent hermes-chat chat --provider custom -m cloud-sanitized-auto
@@ -78,11 +79,11 @@ OmniRoute (комбо `cloud-auto` / `cloud-chat` / `cloud-<provider>`). Мод�
 1. Провижининг `provision_omniroute.sh` подключает в OmniRoute провайдеров
   **OpenRouter**, **Gemini**, **Groq**, **Mistral**, **Cerebras** из `.env-ключей`
   (или OmniRoute сам регистрирует их по env-паттерну `{PROVIDER_ID}_API_KEY`) и
-  создаёт комбо `cloud-auto` (агентный пул: Mistral + Gemini), `cloud-chat`
-  (чат-пул: широкий набор free-моделей, включая без tool-calls) и провайдерные
-  комбо `cloud-mistral` / `cloud-gemini` / `cloud-groq` (только для провайдеров
-  с заданным ключом). Cerebras подключён как необязательная цель и добавляется
-  в пулы только после активации биллинга и успешного probe. Ненадёжные
+  создаёт провайдерные комбо `cloud-mistral` / `cloud-gemini` / `cloud-groq`
+  (только для провайдеров с заданным ключом). `cloud-auto` и `cloud-chat`
+  создаёт только `refresh_omniroute_combo.py` из моделей, прошедших probe.
+  Cerebras подключён как необязательная цель и добавляется в пулы только после
+  активации биллинга и успешного probe. Ненадёжные
   бесплатные модели OpenRouter отсеиваются по SSE-зависаниям и 401/квотам.
 2. В комбо входят только бесплатные модели; OmniRoute реалтайм-скорит их
    (здоровье, квота, латентность, цена) и выбирает целевую модель на запрос.
@@ -91,9 +92,11 @@ OmniRoute (комбо `cloud-auto` / `cloud-chat` / `cloud-<provider>`). Мод�
    умолчанию).
 3. `refresh_omniroute_combo.py` раздельно проверяет пулы: **агентный** (`cloud-auto`,
    критерий — стриминговый tool-call до `[DONE]`, нужно Hermes) и **чат-пул**
-   (`cloud-chat`, критерий — обычный SSE-ответ с контентом; tool-calls не нужны).
-   Так исчерпание квот инструментальными моделями не роняет чат: у него свой,
-   более широкий запас моделей.
+  (`cloud-chat`, критерий — обычный SSE-ответ с контентом; tool-calls не нужны).
+  В combo попадают только прошедшие probe модели; если здоровых целей нет,
+  соответствующее combo удаляется, а не заполняется непроверенным fallback.
+  Так исчерпание квот инструментальными моделями не роняет чат: у него свой,
+  более широкий запас моделей.
 4. LiteLLM применяет к запросу анонимизацию Presidio и передаёт его в OmniRoute —
    **все** исходящие запросы идут через эти защищённые пути, PII до
    провайдеров не доходит.
@@ -965,21 +968,21 @@ docker exec -e HERMES_BLOCK="$BLOCK" -e LD_PRELOAD=/usr/local/lib/filegate.so \
   - `OMNIROUTE_API_KEY` — passthrough-ключ для `LiteLLM → OmniRoute`;
   - `{PROVIDER_ID}_API_KEY` — облачные ключи (`OPENROUTER_`, `GEMINI_`, ...);
   - `OMNIROUTE_MEMORY_MB` — размер V8-кучи.
-- `provision_omniroute.sh`: идемпотентно логинится в management API, подключает
-  провайдеров openrouter/gemini/groq/mistral/cerebras из `.env` (когда коннекшна
-  ещё нет) и создаёт комбо `cloud-auto` (стратегия `auto`, только бесплатные
-  модели, веса: mistral 5, gemini 4 — см. «Провайдерская приватность»),
-  `cloud-chat` (чат-пул, широкий стартовый набор free-моделей) и провайдерные
-  комбо. Groq остаётся подключённым для управления и будущих
-  маршрутов, но его нестабильные free-модели исключены из агентного комбо. Если
-  комбо уже существует — обновляет веса через PUT. Повторный запуск безопасен.
+- `provision_omniroute.sh`: идемпотентно логинится в management API и подключает
+  провайдеров openrouter/gemini/groq/mistral/cerebras из `.env` (когда
+  коннекшна ещё нет), а также создаёт провайдерные комбо. Groq остаётся
+  подключённым для управления и будущих маршрутов. Пулы `cloud-auto` и
+  `cloud-chat` здесь не заполняются непроверенными моделями.
 
 `refresh_omniroute_combo.py` проверяет цели раздельно по пулам: агентный пул —
 потоковым запросом с tool-call (нужен tool-call и финальное SSE-событие),
 чат-пул — обычным потоковым дополнением (нужен контент ассистента, tool-calls
 не требуются). Комбо обновляется только моделями, прошедшими критерии своего
-пула. Успешная проверка кэшируется на пять минут, ошибка — на пятнадцать. Если
-все цели временно недоступны, предыдущее комбо сохраняется.
+пула; если здоровых целей нет, combo удаляется. Успешная проверка кэшируется на
+пять минут, ошибка — на пятнадцать.
+Вывод провижининга и проверки при запуске `update_models_and_run.sh` сохраняется
+в отдельный файл `logs/omniroute-health-<дата-время>-<pid>.log` и одновременно
+показывается в терминале.
 Запуск один раз или в постоянном цикле:
 
 ```bash

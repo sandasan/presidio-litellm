@@ -15,6 +15,10 @@ if [ ! -f "$PROJECT_DIR/.env" ]; then
 fi
 set -a; . "$PROJECT_DIR/.env"; set +a
 DEFAULT_MODEL="${DEFAULT_MODEL:-cloud-sanitized-auto}"
+LOG_DIR="$PROJECT_DIR/logs"
+mkdir -p "$LOG_DIR"
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+HEALTH_LOG="$LOG_DIR/omniroute-health-$RUN_ID.log"
 
 echo "🔄 Образ omniroute (следим за latest)..."
 docker compose -f "$COMPOSE_FILE" pull omniroute
@@ -22,9 +26,8 @@ echo "🔄 Пересборка presidio..."
 docker compose -f "$COMPOSE_FILE" build presidio
 
 # OmniRoute поднимаем отдельно и раньше остальных: до общего up нужно
-# провижининг (подключение провайдеров + комбо cloud-auto/cloud-chat и др.),
-# и только потом стартует litellm (он depends_on omniroute healthy и берёт
-# маршруты cloud-auto / cloud-chat).
+# провижининг (подключение провайдеров), затем health-refresh создаёт пулы
+# cloud-auto/cloud-chat из доступных моделей, и только потом стартует litellm.
 echo "🔄 Запуск omniroute (перед провижинингом)..."
 docker compose -f "$COMPOSE_FILE" up -d --no-deps omniroute
 echo "⏳ Ожидание готовности OmniRoute..."
@@ -39,11 +42,14 @@ if [ "$(docker inspect -f '{{.State.Health.Status}}' omniroute 2>/dev/null || tr
   exit 1
 fi
 
-echo "🔐 Провижининг OmniRoute (провайдеры из .env + комбо cloud-auto/chat/mistral/gemini/groq)..."
-"$PROJECT_DIR/provision_omniroute.sh"
-echo "🩺 Проверка моделей (агентный пул: SSE + tool-call; чат-пул: SSE + ответ)..."
-python3 "$PROJECT_DIR/refresh_omniroute_combo.py" || \
-  echo "⚠️ Нет новых здоровых целей; сохраняем последнее рабочее комбо."
+printf '[%s] Запуск провижининга и проверки моделей OmniRoute\n' "$(date --iso-8601=seconds)" | tee -a "$HEALTH_LOG"
+echo "📝 Журнал проверки: $HEALTH_LOG"
+echo "🔐 Провижининг OmniRoute (провайдеры из .env + именованные комбо)..." | tee -a "$HEALTH_LOG"
+"$PROJECT_DIR/provision_omniroute.sh" 2>&1 | tee -a "$HEALTH_LOG"
+echo "🩺 Проверка моделей (агентный пул: SSE + tool-call; чат-пул: SSE + ответ)..." | tee -a "$HEALTH_LOG"
+if ! python3 "$PROJECT_DIR/refresh_omniroute_combo.py" 2>&1 | tee -a "$HEALTH_LOG"; then
+  echo "⚠️ Health-refresh завершился ошибкой; проверьте доступность моделей и OmniRoute." | tee -a "$HEALTH_LOG"
+fi
 
 echo "🔄 Запуск остального стека (presidio + litellm + hermes-agent + open-webui)..."
 # up без списка сервисов: создаёт/пересоздаёт все контейнеры, включая hermes-agent

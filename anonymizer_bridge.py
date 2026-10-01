@@ -64,16 +64,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                     names_orig = re.findall(r'[А-ЯҐЄІЇ][а-яґєії\']+\s+[А-ЯҐЄІЇ][а-яґєії\']+', orig_text)
 
                                     for p in placeholders:
-                                        if "EMAIL" in p and emails_orig:
-                                            replacements[p] = emails_orig[0]
-                                        elif "CREDIT_CARD" in p and cards_orig:
-                                            replacements[p] = cards_orig[0]
-                                        elif "PERSON" in p and names_orig:
-                                            replacements[p] = names_orig[0]
+                                        if "EMAIL" in p and emails_orig and p not in replacements:
+                                            replacements[p] = emails_orig.pop(0)
+                                        elif "CREDIT_CARD" in p and cards_orig and p not in replacements:
+                                            replacements[p] = cards_orig.pop(0)
+                                        elif "PERSON" in p and names_orig and p not in replacements:
+                                            replacements[p] = names_orig.pop(0)
+                                        # ORGANIZATION намеренно исключена, чтобы не ломать контекст кодовой базы
+                                        # elif "ORGANIZATION" in p and orgs_orig and p not in replacements:
+                                        #     replacements[p] = orgs_orig.pop(0)
 
-                                if replacements:
-                                    print(f"[Map Created] Собрана карта замен: {replacements}", flush=True)
-                                msg["content"] = anonymized_text
+                                    if replacements:
+                                        print(f"[Map Created] Количество замен: {len(replacements)}", flush=True)
+                                    msg["content"] = anonymized_text
                         except Exception as e:
                             print(f"[Presidio Bridge Error] {e}", file=sys.stderr, flush=True)
             final_body = json.dumps(body).encode('utf-8')
@@ -112,11 +115,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     self.wfile.flush()
 
         except urllib.error.HTTPError as e:
+            error_body = e.read()
+            print(f"[Upstream Error {e.code}] Ответ от opencode.ai", file=sys.stderr, flush=True)
             self.send_response(e.code)
             for k, v in e.headers.items():
-                self.send_header(k, v)
+                if k.lower() not in ['content-length', 'transfer-encoding']:
+                    self.send_header(k, v)
+            self.send_header('Content-Length', str(len(error_body)))
             self.end_headers()
-            self.wfile.write(e.read())
+            self.wfile.write(error_body)
         except Exception as e:
             self.send_response(500)
             self.end_headers()

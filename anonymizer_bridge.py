@@ -5,29 +5,28 @@ import sys
 import re
 import codecs
 import threading
-import uuid
 import socket
 import urllib.error
-from collections import OrderedDict
 import urllib.request
 import ssl
 import http.client
 
 PRESIDIO_URL = "http://127.0.0.1:5001"
 OPENCODE_REAL_IP = "104.21.32.140"
-PLACEHOLDER_PATTERN = re.compile(r"<[A-Z][A-Z0-9_]*_\d+_[0-9a-f]{32}>")
+PLACEHOLDER_PATTERN = re.compile(r"<[A-Z][A-Z0-9_]*_\d+(?:_[0-9a-f]{32})?>")
 MEDIA_TYPES = {"image", "image_url", "input_image", "audio", "input_audio", "video", "file"}
-RESTORE_CACHE_LIMIT = 20000
-RESTORE_CACHE = OrderedDict()
-RESTORE_CACHE_LOCK = threading.Lock()
+ENTITY_VALUE_TO_PLACEHOLDER = {}
+PLACEHOLDER_TO_ENTITY_VALUE = {}
+ENTITY_COUNTERS = {}
+ANONYMIZATION_LOCK = threading.Lock()
 
 
 class UnresolvedPlaceholderError(ValueError):
     """Raised when an old anonymization token has no local restore mapping."""
 
 
-def anonymize_from_results(text, analyzer_results, counters, replacements):
-    """Replace detected spans with unique placeholders and retain exact values."""
+def anonymize_from_results(text, analyzer_results, replacements):
+    """Replace detected values consistently and retain exact values for restoration."""
     spans = []
     for result in analyzer_results:
         if not isinstance(result, dict):
@@ -60,22 +59,23 @@ def anonymize_from_results(text, analyzer_results, counters, replacements):
     for result in merged_spans:
         start, end = result["start"], result["end"]
         entity_type = result["entity_type"]
-        counters[entity_type] = counters.get(entity_type, 0) + 1
-        placeholder = f"<{entity_type}_{counters[entity_type]}_{uuid.uuid4().hex}>"
-        parts.extend((text[cursor:start], placeholder))
         original_value = text[start:end]
+        mapping_key = (entity_type, original_value)
+        with ANONYMIZATION_LOCK:
+            placeholder = ENTITY_VALUE_TO_PLACEHOLDER.get(mapping_key)
+            if placeholder is None:
+                ENTITY_COUNTERS[entity_type] = ENTITY_COUNTERS.get(entity_type, 0) + 1
+                placeholder = f"<{entity_type}_{ENTITY_COUNTERS[entity_type]}>"
+                ENTITY_VALUE_TO_PLACEHOLDER[mapping_key] = placeholder
+                PLACEHOLDER_TO_ENTITY_VALUE[placeholder] = original_value
+        parts.extend((text[cursor:start], placeholder))
         replacements[placeholder] = original_value
-        with RESTORE_CACHE_LOCK:
-            RESTORE_CACHE[placeholder] = original_value
-            RESTORE_CACHE.move_to_end(placeholder)
-            while len(RESTORE_CACHE) > RESTORE_CACHE_LIMIT:
-                RESTORE_CACHE.popitem(last=False)
         cursor = end
     parts.append(text[cursor:])
     return "".join(parts)
 
 
-def anonymize_text(text, counters, replacements):
+def anonymize_text(text, replacements):
     add_cached_replacements(text, replacements)
     detected_lang = "en"
     if re.search(r"[ҐґЄєІіЇї]", text):
@@ -95,14 +95,14 @@ def anonymize_text(text, counters, replacements):
         raise ValueError("Invalid Presidio analyzer response")
     if not analyzer_results:
         return text
-    return anonymize_from_results(text, analyzer_results, counters, replacements)
+    return anonymize_from_results(text, analyzer_results, replacements)
 
 
-def anonymize_value(value, counters, replacements):
+def anonymize_value(value, replacements):
     if isinstance(value, str):
-        return anonymize_text(value, counters, replacements)
+        return anonymize_text(value, replacements)
     if isinstance(value, list):
-        return [anonymize_value(item, counters, replacements) for item in value]
+        return [anonymize_value(item, replacements) for item in value]
     if isinstance(value, dict):
         media_keys = {"image", "image_url", "input_image", "audio", "input_audio", "video", "file_data"}
         content_type = value.get("type")
@@ -112,7 +112,7 @@ def anonymize_value(value, counters, replacements):
         if any(key.lower() in media_keys and item for key, item in value.items()):
             raise ValueError("Multimodal payload is not supported by the anonymizer")
         return {
-            anonymize_text(key, counters, replacements): anonymize_value(item, counters, replacements)
+            anonymize_text(key, replacements): anonymize_value(item, replacements)
             for key, item in value.items()
         }
     return value
@@ -120,12 +120,11 @@ def anonymize_value(value, counters, replacements):
 
 def add_cached_replacements(text, replacements):
     for placeholder in PLACEHOLDER_PATTERN.findall(text):
-        with RESTORE_CACHE_LOCK:
-            original_value = RESTORE_CACHE.get(placeholder)
-            if original_value is not None:
-                RESTORE_CACHE.move_to_end(placeholder)
-                replacements[placeholder] = original_value
-                continue
+        with ANONYMIZATION_LOCK:
+            original_value = PLACEHOLDER_TO_ENTITY_VALUE.get(placeholder)
+        if original_value is not None:
+            replacements[placeholder] = original_value
+            continue
         raise UnresolvedPlaceholderError(
             "An anonymization token has no local restore mapping"
         )
@@ -291,8 +290,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
         raw_body = self.rfile.read(content_length)
         replacements = {}
-        entity_counters = {}
-
         try:
             body = json.loads(raw_body.decode('utf-8'))
             validate_chat_request(body, self.path)
@@ -302,7 +299,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         try:
-            anonymized_body = anonymize_value(body, entity_counters, replacements)
+            anonymized_body = anonymize_value(body, replacements)
             if not isinstance(anonymized_body, dict):
                 raise ValueError("Expected an anonymized JSON object")
             anonymized_body["model"] = model_id
@@ -310,7 +307,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except UnresolvedPlaceholderError:
             self.send_error(
                 409,
-                "Anonymization mapping expired; start a new OpenCode chat session",
+                "Anonymization mapping unavailable; start a new OpenCode chat session",
             )
             return
         except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, TypeError) as e:

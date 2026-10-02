@@ -21,6 +21,18 @@ LITELLM_INTERNAL_REQUEST_FIELDS = {
     "secret_fields",
     "standard_logging_object",
 }
+TOOL_SCHEMA_ENTITIES = [
+    "EMAIL_ADDRESS",
+    "PHONE_NUMBER",
+    "CREDIT_CARD",
+    "IBAN_CODE",
+    "US_SSN",
+    "SECRET_KEY",
+    "DB_CONNECTION",
+    "INTERNAL_IP",
+    "INTERNAL_HOST",
+    "INTERNAL_PATH",
+]
 
 
 class ChatPayloadGuard(CustomLogger):
@@ -66,13 +78,16 @@ class ChatPayloadGuard(CustomLogger):
             return sanitized
         return value
 
-    async def _contains_pii(self, client, value):
+    async def _contains_pii(self, client, value, entities=None):
         if isinstance(value, str):
             if not value:
                 return False
+            payload = {"text": value, "language": "en"}
+            if entities is not None:
+                payload["entities"] = entities
             response = await client.post(
                 PRESIDIO_ANALYZER_URL,
-                json={"text": value, "language": "en"},
+                json=payload,
             )
             response.raise_for_status()
             results = response.json()
@@ -81,13 +96,13 @@ class ChatPayloadGuard(CustomLogger):
             return bool(results)
         if isinstance(value, list):
             for item in value:
-                if await self._contains_pii(client, item):
+                if await self._contains_pii(client, item, entities):
                     return True
         elif isinstance(value, dict):
             for key, item in value.items():
-                if await self._contains_pii(client, key):
+                if await self._contains_pii(client, key, entities):
                     return True
-                if await self._contains_pii(client, item):
+                if await self._contains_pii(client, item, entities):
                     return True
         return False
 
@@ -167,7 +182,8 @@ class ChatPayloadGuard(CustomLogger):
                     value = data[field]
                     if isinstance(value, dict):
                         value = {key: item for key, item in value.items() if key != "pii_tokens"}
-                if await self._contains_pii(client, value):
+                entities = TOOL_SCHEMA_ENTITIES if field == "tools" else None
+                if await self._contains_pii(client, value, entities):
                     raise ValueError(f"Presidio detected PII in request field {field}")
         return data
 

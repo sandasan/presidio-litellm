@@ -123,6 +123,12 @@ def add_cached_replacements(text, replacements):
                 replacements[placeholder] = original_value
 
 
+def normalize_model_id(model):
+    if isinstance(model, str) and model.startswith("opencode/"):
+        return model.removeprefix("opencode/")
+    return model
+
+
 def restore_text(text, replacements):
     for placeholder, original_value in replacements.items():
         text = text.replace(placeholder, original_value)
@@ -155,6 +161,15 @@ def restored_chunks(response, replacements):
     pending += decoder.decode(b"", final=True)
     yield restore_text(pending, replacements)
 
+
+def safe_diagnostic_label(value):
+    if not isinstance(value, str):
+        return None
+    if re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", value):
+        return value
+    return "other"
+
+
 class BoundHTTPSConnection(http.client.HTTPSConnection):
     """Класс соединения, совместимый со всеми версиями Python в Docker."""
     def connect(self):
@@ -167,6 +182,60 @@ class BoundHTTPSConnection(http.client.HTTPSConnection):
 class BoundHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
         return self.do_open(BoundHTTPSConnection, req)
+
+
+def request_shape_summary(body):
+    messages = body.get("messages")
+    message_shapes = []
+    allowed_roles = {"system", "developer", "user", "assistant", "tool", "function"}
+    allowed_block_types = {"text", "image", "image_url", "input_image", "audio", "input_audio", "video", "file"}
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            content_shape = {"type": type(content).__name__}
+            if isinstance(content, str):
+                content_shape["length"] = len(content)
+            elif isinstance(content, list):
+                content_shape["length"] = len(content)
+                content_shape["block_types"] = sorted({
+                    block.get("type") if block.get("type") in allowed_block_types else "other"
+                    for block in content
+                    if isinstance(block, dict) and isinstance(block.get("type"), str)
+                })
+            tool_calls = message.get("tool_calls")
+            message_shapes.append({
+                "role": message.get("role") if isinstance(message.get("role"), str) and message.get("role") in allowed_roles else "other",
+                "content": content_shape,
+                "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+            })
+
+    tools = body.get("tools")
+    tool_types = sorted({
+        "function" if tool.get("type", "function") == "function" else "other"
+        for tool in tools
+        if isinstance(tool, dict) and isinstance(tool.get("type", "function"), str)
+    }) if isinstance(tools, list) else []
+    shape_fields = {
+        "tools", "tool_choice", "response_format", "parallel_tool_calls",
+        "max_tokens", "max_completion_tokens", "temperature", "top_p",
+        "stream_options", "functions", "function_call",
+    }
+    known_fields = shape_fields | {"model", "messages", "metadata", "stream"}
+    return {
+        "model_present": isinstance(body.get("model"), str),
+        "top_level_fields": sorted(key for key in body if key in known_fields),
+        "message_count": len(message_shapes),
+        "messages": message_shapes,
+        "tool_count": len(tools) if isinstance(tools, list) else 0,
+        "tool_types": tool_types,
+        "optional_field_types": {
+            key: type(body[key]).__name__
+            for key in sorted(shape_fields & body.keys())
+        },
+    }
+
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -201,13 +270,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 or any(not isinstance(message, dict) for message in body["messages"])
             ):
                 raise ValueError("Expected a JSON chat request with messages")
+            model_id = normalize_model_id(body.get("model"))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
             self.send_error(400, str(e))
             return
 
         try:
-            body = anonymize_value(body, entity_counters, replacements)
-            final_body = json.dumps(body).encode("utf-8")
+            anonymized_body = anonymize_value(body, entity_counters, replacements)
+            if not isinstance(anonymized_body, dict):
+                raise ValueError("Expected an anonymized JSON object")
+            anonymized_body["model"] = model_id
+            final_body = json.dumps(anonymized_body).encode("utf-8")
         except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, TypeError) as e:
             print(f"[Presidio Bridge Error] {e}", file=sys.stderr, flush=True)
             self.send_error(503, "Presidio anonymization unavailable")
@@ -237,6 +310,26 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except urllib.error.HTTPError as e:
             error_body = e.read()
             print(f"[Upstream Error {e.code}] Ответ от opencode.ai", file=sys.stderr, flush=True)
+            if e.code == 400:
+                try:
+                    upstream_error = json.loads(error_body.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    upstream_error = {}
+                if isinstance(upstream_error, dict):
+                    upstream_error = upstream_error.get("error", upstream_error)
+                error_type = upstream_error.get("type") if isinstance(upstream_error, dict) else None
+                error_code = upstream_error.get("code") if isinstance(upstream_error, dict) else None
+                print(
+                    "[Upstream 400 Details] "
+                    + json.dumps({
+                        "request": request_shape_summary(body),
+                        "error_type": safe_diagnostic_label(error_type),
+                        "error_code": safe_diagnostic_label(error_code),
+                        "error_body_bytes": len(error_body),
+                    }, ensure_ascii=True),
+                    file=sys.stderr,
+                    flush=True,
+                )
             self.send_response(e.code)
             for k, v in e.headers.items():
                 if k.lower() not in ['content-length', 'transfer-encoding']:

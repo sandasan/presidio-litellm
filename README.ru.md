@@ -717,18 +717,29 @@ LiteLLM → Presidio → OmniRoute. Все запросы идут через а
 #### Quick start для Continue
 
 1. Установите расширение Continue для VS Code.
-2. В корне проекта создайте файл `.continue/config.yaml` (можно взять пример
-   из `.continue/config.yaml.example`).
-3. Добавьте модель в OpenAI-совместимом формате:
+2. Откройте активную конфигурацию Continue через шестерёнку рядом с выбранным
+   конфигом. В Linux это обычно `~/.continue/config.yaml`; файл
+   `.continue/config.yaml.example` в репозитории служит шаблоном.
+3. Добавьте модель в OpenAI-совместимом формате. В конфиге v1 нужны заголовок
+   схемы и явные роли модели:
 
 ```yaml
+name: Presidio LiteLLM
+version: 1.0.0
+schema: v1
+
 models:
   - name: Hermes via LiteLLM
     provider: openai
     model: cloud-sanitized-auto
     apiBase: http://localhost:4000/v1
     apiKey: sk-dummy
-    contextLength: 131072
+    defaultCompletionOptions:
+      contextLength: 131072
+    roles:
+      - chat
+      - edit
+      - apply
 ```
 
 4. После сохранения выберите эту модель в Continue и проверьте, что запрос идёт
@@ -791,16 +802,26 @@ cd /path/to/presidio-litellm
 
 ### 2) Continue
 
-Используйте этот набор настроек:
+Добавьте в активную конфигурацию Continue (Linux: `~/.continue/config.yaml`,
+открывается через шестерёнку в селекторе конфигов):
 
 ```yaml
+name: Presidio LiteLLM
+version: 1.0.0
+schema: v1
+
 models:
   - name: Hermes via LiteLLM
     provider: openai
     model: cloud-sanitized-auto
     apiBase: http://localhost:4000/v1
     apiKey: sk-dummy
-    contextLength: 131072
+    defaultCompletionOptions:
+      contextLength: 131072
+    roles:
+      - chat
+      - edit
+      - apply
 ```
 
 Файл-образец уже есть в [.continue/config.yaml.example](.continue/config.yaml.example).

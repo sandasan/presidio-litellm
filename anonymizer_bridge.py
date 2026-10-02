@@ -6,6 +6,8 @@ import re
 import codecs
 import threading
 import uuid
+import socket
+import urllib.error
 from collections import OrderedDict
 import urllib.request
 import ssl
@@ -14,6 +16,7 @@ import http.client
 PRESIDIO_URL = "http://127.0.0.1:5001"
 OPENCODE_REAL_IP = "104.21.32.140"
 PLACEHOLDER_PATTERN = re.compile(r"<[A-Z][A-Z0-9_]*_\d+_[0-9a-f]{32}>")
+MEDIA_TYPES = {"image", "image_url", "input_image", "audio", "input_audio", "video", "file"}
 RESTORE_CACHE_LIMIT = 20000
 RESTORE_CACHE = OrderedDict()
 RESTORE_CACHE_LOCK = threading.Lock()
@@ -98,7 +101,9 @@ def anonymize_value(value, counters, replacements):
         return [anonymize_value(item, counters, replacements) for item in value]
     if isinstance(value, dict):
         media_keys = {"image", "image_url", "input_image", "audio", "input_audio", "video", "file_data"}
-        if value.get("type") in {"image", "image_url", "input_image", "audio", "input_audio", "video", "file"}:
+        content_type = value.get("type")
+        content_types = content_type if isinstance(content_type, list) else [content_type]
+        if any(isinstance(item, str) and item in MEDIA_TYPES for item in content_types):
             raise ValueError("Multimodal payload is not supported by the anonymizer")
         if any(key.lower() in media_keys and item for key, item in value.items()):
             raise ValueError("Multimodal payload is not supported by the anonymizer")
@@ -153,10 +158,7 @@ def restored_chunks(response, replacements):
 class BoundHTTPSConnection(http.client.HTTPSConnection):
     """Класс соединения, совместимый со всеми версиями Python в Docker."""
     def connect(self):
-        # Подключаемся к сырому IP Cloudflare
-        self.sock = self._create_connection((OPENCODE_REAL_IP, 443), self.timeout, self.source_address)
-        if self._tunnel_host:
-            self._tunnel()
+        self.sock = socket.create_connection((OPENCODE_REAL_IP, 443), self.timeout)
 
         # Корректно передаем SNI 'opencode.ai' через TLS контекст без конфликтов в __init__
         context = ssl.create_default_context()
@@ -193,7 +195,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         try:
             body = anonymize_value(body, entity_counters, replacements)
             final_body = json.dumps(body).encode("utf-8")
-        except Exception as e:
+        except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, TypeError) as e:
             print(f"[Presidio Bridge Error] {e}", file=sys.stderr, flush=True)
             self.send_error(503, "Presidio anonymization unavailable")
             return
@@ -204,7 +206,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         upstream_headers['Content-Length'] = str(len(final_body))
 
         url = f"https://opencode.ai{self.path}"
-        opener = urllib.request.build_opener(BoundHTTPSHandler)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), BoundHTTPSHandler)
         req = urllib.request.Request(url, data=final_body, headers=upstream_headers, method="POST")
 
         try:
@@ -229,7 +231,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(error_body)))
             self.end_headers()
             self.wfile.write(error_body)
-        except Exception as e:
+        except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, TypeError) as e:
             self.send_response(500)
             self.end_headers()
             self.wfile.write(str(e).encode('utf-8'))

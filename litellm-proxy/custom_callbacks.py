@@ -324,8 +324,11 @@ class LiteralSecretMasker(CustomLogger):
                                         getattr(fn, "arguments", None), str
                                     ):
                                         fn.arguments = self._restore_text(fn.arguments)
-                if hasattr(chunk, "message") and isinstance(getattr(chunk, "message", None).content, str):
-                    chunk.message.content = self._restore_text(chunk.message.content)
+                message = getattr(chunk, "message", None)
+                if message is not None:
+                    content = getattr(message, "content", None)
+                    if isinstance(content, str):
+                        message.content = self._restore_text(content)
             except Exception:  # noqa: BLE001 — никогда не ломаем стрим из-за маскера
                 pass
             yield chunk

@@ -100,12 +100,6 @@ def opencode_free_upstream_route(target_model_name: str) -> dict:
         "guardrails": ["presidio-anonymizer"]
     }
 
-# def opencode_free_route() -> dict:
-    """Прямой маршрут LiteLLM -> OpenCode Free Endpoints с сохранением сессии.
-
-    forward_client_headers: true — критически важен. Он заставляет LiteLLM
-    пересылать x-opencode-* токены авторизации, которые генерирует плагин PhpStorm.
-    """
 #     return {
 #         "model": "openai/custom",
 #         "api_base": "https://opencode.ai",
@@ -409,7 +403,7 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
     )
 
 
-def main() -> None:
+def main() -> int:
     routes = build_routes()
 
     config_text = build_config(routes)
@@ -419,10 +413,6 @@ def main() -> None:
     for name, params in routes:
         log(f"  - {name} -> {params['model']}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
 
 
 if __name__ == "__main__":

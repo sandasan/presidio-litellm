@@ -2,11 +2,121 @@ import json
 import logging
 import os
 
+import httpx
 from litellm.integrations.custom_logger import CustomLogger
 
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192").strip())
 
 logger = logging.getLogger(__name__)
+PRESIDIO_ANALYZER_URL = os.getenv(
+    "PRESIDIO_ANALYZER_API_BASE", "http://presidio:5001"
+) + "/analyze"
+
+
+class ChatPayloadGuard(CustomLogger):
+    """Reject request formats or tool schemas that bypass Presidio masking."""
+
+    async def _contains_pii(self, client, value):
+        if isinstance(value, str):
+            if not value:
+                return False
+            response = await client.post(
+                PRESIDIO_ANALYZER_URL,
+                json={"text": value, "language": "en"},
+            )
+            response.raise_for_status()
+            results = response.json()
+            if not isinstance(results, list):
+                raise ValueError("Invalid Presidio analyzer response")
+            return bool(results)
+        if isinstance(value, list):
+            for item in value:
+                if await self._contains_pii(client, item):
+                    return True
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                if await self._contains_pii(client, key):
+                    return True
+                if await self._contains_pii(client, item):
+                    return True
+        return False
+
+    async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
+        if not isinstance(data, dict):
+            raise TypeError("Only JSON chat requests are allowed")
+        messages = data.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("Only text chat-completions requests are allowed")
+        for message in messages:
+            if not isinstance(message, dict):
+                raise ValueError("Invalid chat message")
+            if message.get("role") not in {
+                "system", "developer", "user", "assistant", "tool", "function"
+            }:
+                raise ValueError("Unsupported chat message role")
+            content = message.get("content")
+            if isinstance(content, list):
+                if any(
+                    not isinstance(block, dict)
+                    or block.get("type") != "text"
+                    or not isinstance(block.get("text"), str)
+                    for block in content
+                ):
+                    raise ValueError("Only text chat content is supported")
+            elif content is not None and not isinstance(content, str):
+                raise ValueError("Only text chat content is supported")
+            elif content is None and not message.get("tool_calls"):
+                raise ValueError("Chat message has no inspectable text")
+
+            tool_calls = message.get("tool_calls")
+            if tool_calls is not None:
+                if not isinstance(tool_calls, list):
+                    raise ValueError("Invalid tool calls")
+                for tool_call in tool_calls:
+                    function = tool_call.get("function") if isinstance(tool_call, dict) else None
+                    if not isinstance(function, dict):
+                        raise ValueError("Invalid tool-call function")
+                    arguments = function.get("arguments")
+                    if arguments is not None and not isinstance(arguments, str):
+                        raise ValueError("Tool-call arguments must be text")
+
+            function_call = message.get("function_call")
+            if function_call is not None and (
+                not isinstance(function_call, dict)
+                or (
+                    function_call.get("arguments") is not None
+                    and not isinstance(function_call["arguments"], str)
+                )
+            ):
+                raise ValueError("Invalid legacy function call")
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for message in messages:
+                unchecked_fields = {
+                    key: value
+                    for key, value in message.items()
+                    if key not in {"role", "content"}
+                }
+                if isinstance(message.get("content"), list):
+                    unchecked_fields["content_metadata"] = [
+                        {
+                            key: value
+                            for key, value in block.items()
+                            if key not in {"type", "text"}
+                        }
+                        for block in message["content"]
+                    ]
+                if await self._contains_pii(client, unchecked_fields):
+                    raise ValueError("Presidio detected PII outside message content")
+
+            for field, value in data.items():
+                if field in {"messages", "litellm_logging_obj"}:
+                    continue
+                if field == "metadata" and isinstance(value, dict):
+                    value = {key: item for key, item in value.items() if key != "pii_tokens"}
+                if await self._contains_pii(client, value):
+                    raise ValueError(f"Presidio detected PII in request field {field}")
+        return data
 
 
 class MaxTokensClamp(CustomLogger):
@@ -170,3 +280,4 @@ class LiteralSecretMasker(CustomLogger):
 
 proxy_handler_instance = MaxTokensClamp()
 secret_masker_instance = LiteralSecretMasker()
+chat_payload_guard_instance = ChatPayloadGuard()

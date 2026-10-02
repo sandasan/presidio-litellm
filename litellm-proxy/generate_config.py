@@ -284,7 +284,7 @@ def emit_models(routes: Sequence[tuple[str, dict]]) -> str:
             "  cooldown_time: 60",
             "",
             "litellm_settings:",
-            '  callbacks: ["custom_callbacks.proxy_handler_instance", "custom_callbacks.secret_masker_instance"]',
+            '  callbacks: ["custom_callbacks.proxy_handler_instance", "custom_callbacks.secret_masker_instance", "custom_callbacks.chat_payload_guard_instance"]',
             "",
             # Presidio-гардрейл: маскирование входящего запроса (pre_call) и
             # восстановление оригинальных значений в ответе модели (post_call).
@@ -392,10 +392,9 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
             "  cooldown_time: 60",
             "",
             "litellm_settings:",
-            '  callbacks: ["custom_callbacks.proxy_handler_instance", "custom_callbacks.secret_masker_instance"]',
+            '  callbacks: ["custom_callbacks.proxy_handler_instance", "custom_callbacks.secret_masker_instance", "custom_callbacks.chat_payload_guard_instance"]',
             # КЛЮЧЕВЫЕ НАСТРОЙКИ ДЛЯ ПРЯМОГО ПРОБРОСА:
             "  allow_unsupported_deployments: true", # Разрешаем модели, которых нет в статичном списке
-            "  fall_back_to_passthrough_filter_path: true", # Пропускаем неизвестные URL-пути вроде /responses дальше
             "",
             "guardrails:",
             "  - guardrail_name: presidio-anonymizer",

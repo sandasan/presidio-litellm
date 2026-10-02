@@ -3,12 +3,152 @@ import http.server
 import json
 import sys
 import re
+import codecs
+import threading
+import uuid
+from collections import OrderedDict
 import urllib.request
 import ssl
 import http.client
 
 PRESIDIO_URL = "http://127.0.0.1:5001"
 OPENCODE_REAL_IP = "104.21.32.140"
+PLACEHOLDER_PATTERN = re.compile(r"<[A-Z][A-Z0-9_]*_\d+_[0-9a-f]{32}>")
+RESTORE_CACHE_LIMIT = 20000
+RESTORE_CACHE = OrderedDict()
+RESTORE_CACHE_LOCK = threading.Lock()
+
+
+def anonymize_from_results(text, analyzer_results, counters, replacements):
+    """Replace detected spans with unique placeholders and retain exact values."""
+    spans = []
+    for result in analyzer_results:
+        if not isinstance(result, dict):
+            raise ValueError("Invalid Presidio analyzer result")
+        start, end = result.get("start"), result.get("end")
+        entity_type = result.get("entity_type")
+        if (
+            not isinstance(start, int)
+            or isinstance(start, bool)
+            or not isinstance(end, int)
+            or isinstance(end, bool)
+            or not isinstance(entity_type, str)
+            or start < 0
+            or start >= end
+            or end > len(text)
+        ):
+            raise ValueError("Invalid Presidio analyzer span")
+        spans.append({"start": start, "end": end, "entity_type": entity_type})
+    spans.sort(key=lambda item: (item["start"], item["end"]))
+
+    merged_spans = []
+    for span in spans:
+        if merged_spans and span["start"] < merged_spans[-1]["end"]:
+            merged_spans[-1]["end"] = max(merged_spans[-1]["end"], span["end"])
+        else:
+            merged_spans.append(span)
+
+    parts = []
+    cursor = 0
+    for result in merged_spans:
+        start, end = result["start"], result["end"]
+        entity_type = result["entity_type"]
+        counters[entity_type] = counters.get(entity_type, 0) + 1
+        placeholder = f"<{entity_type}_{counters[entity_type]}_{uuid.uuid4().hex}>"
+        parts.extend((text[cursor:start], placeholder))
+        original_value = text[start:end]
+        replacements[placeholder] = original_value
+        with RESTORE_CACHE_LOCK:
+            RESTORE_CACHE[placeholder] = original_value
+            RESTORE_CACHE.move_to_end(placeholder)
+            while len(RESTORE_CACHE) > RESTORE_CACHE_LIMIT:
+                RESTORE_CACHE.popitem(last=False)
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def anonymize_text(text, counters, replacements):
+    add_cached_replacements(text, replacements)
+    detected_lang = "en"
+    if re.search(r"[ҐґЄєІіЇї]", text):
+        detected_lang = "uk"
+    elif re.search(r"[а-яА-ЯёЁ]", text):
+        detected_lang = "ru"
+
+    payload = json.dumps({"text": text, "language": detected_lang}).encode("utf-8")
+    req_presidio = urllib.request.Request(
+        PRESIDIO_URL + "/analyze",
+        data=payload,
+        headers={"Content-Type": "application/json", "Host": "127.0.0.1:5001"},
+    )
+    with urllib.request.urlopen(req_presidio, timeout=10) as response:
+        analyzer_results = json.loads(response.read().decode("utf-8"))
+    if not isinstance(analyzer_results, list):
+        raise ValueError("Invalid Presidio analyzer response")
+    if not analyzer_results:
+        return text
+    return anonymize_from_results(text, analyzer_results, counters, replacements)
+
+
+def anonymize_value(value, counters, replacements):
+    if isinstance(value, str):
+        return anonymize_text(value, counters, replacements)
+    if isinstance(value, list):
+        return [anonymize_value(item, counters, replacements) for item in value]
+    if isinstance(value, dict):
+        media_keys = {"image", "image_url", "input_image", "audio", "input_audio", "video", "file_data"}
+        if value.get("type") in {"image", "image_url", "input_image", "audio", "input_audio", "video", "file"}:
+            raise ValueError("Multimodal payload is not supported by the anonymizer")
+        if any(key.lower() in media_keys and item for key, item in value.items()):
+            raise ValueError("Multimodal payload is not supported by the anonymizer")
+        return {
+            anonymize_text(key, counters, replacements): anonymize_value(item, counters, replacements)
+            for key, item in value.items()
+        }
+    return value
+
+
+def add_cached_replacements(text, replacements):
+    for placeholder in PLACEHOLDER_PATTERN.findall(text):
+        with RESTORE_CACHE_LOCK:
+            original_value = RESTORE_CACHE.get(placeholder)
+            if original_value is not None:
+                RESTORE_CACHE.move_to_end(placeholder)
+                replacements[placeholder] = original_value
+
+
+def restore_text(text, replacements):
+    for placeholder, original_value in replacements.items():
+        text = text.replace(placeholder, original_value)
+    return text
+
+
+def restored_chunks(response, replacements):
+    """Restore placeholders even when their bytes cross response chunk boundaries."""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    tail_length = max((len(key) for key in replacements), default=1) - 1
+    pending = ""
+    while True:
+        chunk = response.read1(4096)
+        if not chunk:
+            break
+        combined = pending + decoder.decode(chunk)
+        split_at = max(0, len(combined) - tail_length)
+        for placeholder in replacements:
+            search_from = 0
+            while True:
+                start = combined.find(placeholder, search_from)
+                if start < 0:
+                    break
+                end = start + len(placeholder)
+                if start < split_at < end:
+                    split_at = start
+                search_from = start + 1
+        yield restore_text(combined[:split_at], replacements)
+        pending = combined[split_at:]
+    pending += decoder.decode(b"", final=True)
+    yield restore_text(pending, replacements)
 
 class BoundHTTPSConnection(http.client.HTTPSConnection):
     """Класс соединения, совместимый со всеми версиями Python в Docker."""
@@ -28,60 +168,35 @@ class BoundHTTPSHandler(urllib.request.HTTPSHandler):
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
-        content_length = int(self.headers['Content-Length'])
+        try:
+            content_length = int(self.headers["Content-Length"])
+        except (KeyError, ValueError):
+            self.send_error(400, "Missing or invalid Content-Length")
+            return
         raw_body = self.rfile.read(content_length)
-        final_body = raw_body
         replacements = {}
+        entity_counters = {}
 
         try:
             body = json.loads(raw_body.decode('utf-8'))
-            if "messages" in body:
-                for msg in body["messages"]:
-                    if "content" in msg and isinstance(msg["content"], str):
-                        orig_text = msg["content"]
+            if (
+                not isinstance(body, dict)
+                or not isinstance(body.get("messages"), list)
+                or not body["messages"]
+                or any(not isinstance(message, dict) for message in body["messages"])
+            ):
+                raise ValueError("Expected a JSON chat request with messages")
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
+            self.send_error(400, str(e))
+            return
 
-                        detected_lang = "en"
-                        if re.search(r'[ҐґЄєІіЇї]', orig_text):
-                            detected_lang = "uk"
-                        elif re.search(r'[а-яА-ЯёЁ]', orig_text):
-                            detected_lang = "ru"
-
-                        try:
-                            payload = json.dumps({"text": orig_text, "language": detected_lang}).encode('utf-8')
-                            req_presidio = urllib.request.Request(
-                                PRESIDIO_URL,
-                                data=payload,
-                                headers={"Content-Type": "application/json", "Host": "127.0.0.1:5001"}
-                            )
-                            with urllib.request.urlopen(req_presidio, timeout=4) as resp:
-                                presidio_res = json.loads(resp.read().decode('utf-8'))
-                                anonymized_text = presidio_res.get("text", orig_text)
-
-                                placeholders = re.findall(r'(<[A-Z_]+(?:_\d+)?>)', anonymized_text)
-                                if placeholders:
-                                    emails_orig = re.findall(r'[\w\.-]+@[\w\.-]+\.\w+', orig_text)
-                                    cards_orig = re.findall(r'\d{13,19}', orig_text)
-                                    names_orig = re.findall(r'[А-ЯҐЄІЇ][а-яґєії\']+\s+[А-ЯҐЄІЇ][а-яґєії\']+', orig_text)
-
-                                    for p in placeholders:
-                                        if "EMAIL" in p and emails_orig and p not in replacements:
-                                            replacements[p] = emails_orig.pop(0)
-                                        elif "CREDIT_CARD" in p and cards_orig and p not in replacements:
-                                            replacements[p] = cards_orig.pop(0)
-                                        elif "PERSON" in p and names_orig and p not in replacements:
-                                            replacements[p] = names_orig.pop(0)
-                                        # ORGANIZATION намеренно исключена, чтобы не ломать контекст кодовой базы
-                                        # elif "ORGANIZATION" in p and orgs_orig and p not in replacements:
-                                        #     replacements[p] = orgs_orig.pop(0)
-
-                                    if replacements:
-                                        print(f"[Map Created] Количество замен: {len(replacements)}", flush=True)
-                                    msg["content"] = anonymized_text
-                        except Exception as e:
-                            print(f"[Presidio Bridge Error] {e}", file=sys.stderr, flush=True)
-            final_body = json.dumps(body).encode('utf-8')
-        except Exception:
-            pass
+        try:
+            body = anonymize_value(body, entity_counters, replacements)
+            final_body = json.dumps(body).encode("utf-8")
+        except Exception as e:
+            print(f"[Presidio Bridge Error] {e}", file=sys.stderr, flush=True)
+            self.send_error(503, "Presidio anonymization unavailable")
+            return
 
         upstream_headers = {k: v for k, v in self.headers.items() if k.lower() not in ['host', 'content-length', 'accept-encoding']}
         upstream_headers['Host'] = 'opencode.ai'
@@ -100,18 +215,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         self.send_header(k, v)
                 self.end_headers()
 
-                while True:
-                    chunk = response.read1(4096)
-                    if not chunk:
-                        break
-                    try:
-                        chunk_str = chunk.decode('utf-8', errors='ignore')
-                        if replacements:
-                            for placeholder, original_value in replacements.items():
-                                chunk_str = chunk_str.replace(placeholder, original_value)
-                        self.wfile.write(chunk_str.encode('utf-8'))
-                    except Exception:
-                        self.wfile.write(chunk)
+                for chunk_str in restored_chunks(response, replacements):
+                    self.wfile.write(chunk_str.encode('utf-8'))
                     self.wfile.flush()
 
         except urllib.error.HTTPError as e:

@@ -9,46 +9,41 @@ PRESIDIO_ANONYMIZER_URL = os.getenv("PRESIDIO_ANONYMIZER_API_BASE", "http://pres
 class PresidioAnonymizer(CustomLogger):
     async def _anonymize_text(self, client: httpx.AsyncClient, text: str) -> str:
         """Вспомогательная функция для отправки текста в Presidio Analyzer + Anonymizer."""
-        if not text or not isinstance(text, str):
+        if text == "":
+            return text
+        if not isinstance(text, str):
+            raise TypeError("Presidio accepts text strings only")
+
+        res_analyzer = await client.post(
+            PRESIDIO_ANALYZER_URL,
+            json={"text": text, "language": "en"}
+        )
+        res_analyzer.raise_for_status()
+        analyzer_results = res_analyzer.json()
+        if not isinstance(analyzer_results, list):
+            raise ValueError("Invalid Presidio analyzer response")
+        if not analyzer_results:
             return text
 
-        try:
-            # 1. Анализ текста на PII
-            res_analyzer = await client.post(
-                PRESIDIO_ANALYZER_URL,
-                json={"text": text, "language": "en"}
-            )
-
-            if res_analyzer.status_code == 200:
-                analyzer_results = res_analyzer.json()
-                if analyzer_results and isinstance(analyzer_results, list):
-                    # 2. Анонимизация найденных сущностей
-                    anon_payload = {
-                        "text": text,
-                        "analyzer_results": analyzer_results
-                    }
-                    res_anon = await client.post(
-                        PRESIDIO_ANONYMIZER_URL,
-                        json=anon_payload
-                    )
-                    if res_anon.status_code == 200:
-                        anon_data = res_anon.json()
-                        if isinstance(anon_data, dict) and "text" in anon_data:
-                            return anon_data["text"]
-        except Exception as e:
-            print(f"[Presidio Anonymization Sub-Error] {e}", flush=True)
-
-        return text
+        anon_payload = {"text": text, "analyzer_results": analyzer_results}
+        res_anon = await client.post(PRESIDIO_ANONYMIZER_URL, json=anon_payload)
+        res_anon.raise_for_status()
+        anon_data = res_anon.json()
+        if not isinstance(anon_data, dict) or not isinstance(anon_data.get("text"), str):
+            raise ValueError("Invalid Presidio anonymizer response")
+        return anon_data["text"]
 
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         """Хук LiteLLM, перехватывающий контекст перед отправкой внешнему провайдеру."""
         try:
             if not isinstance(data, dict):
-                return data
+                raise TypeError("LiteLLM request must be a JSON object")
 
             messages = data.get("messages", [])
-            if not messages or not isinstance(messages, list):
-                return data
+            if not messages or not isinstance(messages, list) or any(
+                not isinstance(message, dict) for message in messages
+            ):
+                raise ValueError("LiteLLM request must contain valid chat messages")
 
             async with httpx.AsyncClient(timeout=10.0) as client:
                 for message in messages:
@@ -59,10 +54,16 @@ class PresidioAnonymizer(CustomLogger):
                     if "content" in message and isinstance(message["content"], str):
                         message["content"] = await self._anonymize_text(client, message["content"])
                     elif "content" in message and isinstance(message["content"], list):
-                        # Для мультимодальных сообщений или разделенных блоков текста
                         for block in message["content"]:
-                            if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
-                                block["text"] = await self._anonymize_text(client, block["text"])
+                            if (
+                                not isinstance(block, dict)
+                                or block.get("type") != "text"
+                                or not isinstance(block.get("text"), str)
+                            ):
+                                raise ValueError("Unsupported non-text message content")
+                            block["text"] = await self._anonymize_text(client, block["text"])
+                    elif "content" in message and message["content"] is not None:
+                        raise ValueError("Unsupported message content type")
 
                     # 2. Очистка аргументов вызова функций/инструментов (Tool Calls для Агентов)
                     if "tool_calls" in message and isinstance(message["tool_calls"], list):
@@ -70,17 +71,20 @@ class PresidioAnonymizer(CustomLogger):
                             if not isinstance(tool_call, dict):
                                 continue
 
-                            function_data = tool_call.get("function", {})
+                            function_data = tool_call.get("function")
+                            if not isinstance(function_data, dict):
+                                raise ValueError("Invalid tool-call function")
                             args_str = function_data.get("arguments")
 
-                            if args_str and isinstance(args_str, str):
-                                # Пробуем анонимизировать JSON-строку аргументов
+                            if args_str is not None:
+                                if not isinstance(args_str, str):
+                                    raise ValueError("Tool-call arguments must be text")
                                 anonymized_args = await self._anonymize_text(client, args_str)
                                 function_data["arguments"] = anonymized_args
 
         except Exception as e:
             print(f"[Presidio Agent Hook Error] {e}", flush=True)
-
+            raise
         return data
 
 proxy_handler_instance = PresidioAnonymizer()

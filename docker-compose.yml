@@ -3,7 +3,7 @@ services:
     build: ./presidio-server
     container_name: presidio-server
     ports:
-      - "5001:5001"
+      - "${STACK_BIND_ADDRESS:-127.0.0.1}:5001:5001"
     volumes:
       - ./presidio_config.yaml:/app/presidio_config.yaml
     environment:
@@ -26,7 +26,14 @@ services:
     network_mode: "host" # Позволяет скрипту прозрачно слушать 127.0.0.1:4001 хоста и видеть presidio на 5001
     restart: unless-stopped
     depends_on:
-      - presidio
+      presidio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4001/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   omniroute:
     image: diegosouzapw/omniroute:latest
@@ -35,7 +42,7 @@ services:
     stop_grace_period: 40s
     ports:
       # Дашборд и API: http://127.0.0.1:20128 (изнутри сети контейнеры ходят по http://omniroute:20128)
-      - "127.0.0.1:20128:20128"
+      - "${STACK_BIND_ADDRESS:-127.0.0.1}:20128:20128"
     volumes:
       - omniroute-data:/app/data
     environment:
@@ -70,7 +77,7 @@ services:
     image: ghcr.io/berriai/litellm:main-latest
     container_name: litellm-proxy
     ports:
-      - "4000:4000"
+      - "${STACK_BIND_ADDRESS:-127.0.0.1}:4000:4000"
     volumes:
       - ./litellm-proxy:/app/litellm-proxy
       - ./presidio_config.yaml:/app/presidio_config.yaml
@@ -97,6 +104,12 @@ services:
         condition: service_healthy
       omniroute:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 60s
     restart: unless-stopped
     # При старте контейнера генерируем config.yaml (статичный маршрут к
     # OmniRoute), затем запускаем сам LiteLLM-прокси с этим конфигом.
@@ -139,7 +152,8 @@ services:
       - no_proxy=litellm,presidio,omniroute,open-webui,localhost,127.0.0.1,.local
     working_dir: /workspace
     depends_on:
-      - litellm
+      litellm:
+        condition: service_healthy
     restart: unless-stopped
 
   # Чат-интерфейс в браузере поверх LiteLLM: тот же маршрут cloud-sanitized-auto,
@@ -149,7 +163,7 @@ services:
     image: ghcr.io/open-webui/open-webui:main
     container_name: open-webui
     ports:
-      - "3000:8080"
+      - "${STACK_BIND_ADDRESS:-127.0.0.1}:3000:8080"
     volumes:
       - open-webui-data:/app/backend/data
     environment:
@@ -161,7 +175,14 @@ services:
       # Отключаем встроенную защиту PII и обращение к внешнему/ненайденному анализатору
       - ENABLE_PII_DETECTION=False
     depends_on:
-      - litellm
+      litellm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 4
+      start_period: 60s
     restart: unless-stopped
 
 volumes:

@@ -13,6 +13,11 @@ All requests sent to cloud models pass through **Presidio**. Personal data such 
 email addresses, names, phone numbers, API keys, database connection strings, and
 internal IP addresses are masked before the request reaches a provider.
 
+Published ports bind to this machine by default. Set
+`STACK_BIND_ADDRESS=0.0.0.0` in `.env` only when LAN access is required. Do not
+expose the APIs directly to the internet: LiteLLM accepts a dummy key and
+Presidio has no built-in authentication.
+
 ## Quick start
 
 1. Create the environment file and add provider keys:

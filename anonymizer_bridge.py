@@ -169,6 +169,19 @@ class BoundHTTPSHandler(urllib.request.HTTPSHandler):
         return self.do_open(BoundHTTPSConnection, req)
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/health":
+            self.send_error(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status":"healthy"}')
+
+    def log_message(self, format, *args):
+        if self.path != "/health":
+            super().log_message(format, *args)
+
     def do_POST(self):
         try:
             content_length = int(self.headers["Content-Length"])

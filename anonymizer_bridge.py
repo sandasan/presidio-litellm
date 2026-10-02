@@ -137,6 +137,25 @@ def normalize_model_id(model):
     return model
 
 
+def validate_chat_request(body, path):
+    if not isinstance(body, dict):
+        raise ValueError("Expected a JSON request object")
+    endpoint = path.partition("?")[0]
+    if endpoint.endswith("/responses"):
+        request_input = body.get("input")
+        if not isinstance(request_input, (str, list)) or not request_input:
+            raise ValueError("Expected an OpenAI Responses request with input")
+        return
+
+    messages = body.get("messages")
+    if (
+        not isinstance(messages, list)
+        or not messages
+        or any(not isinstance(message, dict) for message in messages)
+    ):
+        raise ValueError("Expected a JSON chat request with messages")
+
+
 def restore_text(text, replacements):
     for placeholder, original_value in replacements.items():
         text = text.replace(placeholder, original_value)
@@ -276,13 +295,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             body = json.loads(raw_body.decode('utf-8'))
-            if (
-                not isinstance(body, dict)
-                or not isinstance(body.get("messages"), list)
-                or not body["messages"]
-                or any(not isinstance(message, dict) for message in body["messages"])
-            ):
-                raise ValueError("Expected a JSON chat request with messages")
+            validate_chat_request(body, self.path)
             model_id = normalize_model_id(body.get("model"))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
             self.send_error(400, str(e))

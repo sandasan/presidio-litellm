@@ -22,6 +22,10 @@ RESTORE_CACHE = OrderedDict()
 RESTORE_CACHE_LOCK = threading.Lock()
 
 
+class UnresolvedPlaceholderError(ValueError):
+    """Raised when an old anonymization token has no local restore mapping."""
+
+
 def anonymize_from_results(text, analyzer_results, counters, replacements):
     """Replace detected spans with unique placeholders and retain exact values."""
     spans = []
@@ -121,6 +125,10 @@ def add_cached_replacements(text, replacements):
             if original_value is not None:
                 RESTORE_CACHE.move_to_end(placeholder)
                 replacements[placeholder] = original_value
+                continue
+        raise UnresolvedPlaceholderError(
+            "An anonymization token has no local restore mapping"
+        )
 
 
 def normalize_model_id(model):
@@ -194,16 +202,21 @@ def request_shape_summary(body):
             if not isinstance(message, dict):
                 continue
             content = message.get("content")
-            content_shape = {"type": type(content).__name__}
+            content_shape: dict[str, object] = {"type": type(content).__name__}
             if isinstance(content, str):
                 content_shape["length"] = len(content)
             elif isinstance(content, list):
                 content_shape["length"] = len(content)
-                content_shape["block_types"] = sorted({
-                    block.get("type") if block.get("type") in allowed_block_types else "other"
-                    for block in content
-                    if isinstance(block, dict) and isinstance(block.get("type"), str)
-                })
+                block_types = set()
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if isinstance(block_type, str):
+                        block_types.add(
+                            block_type if block_type in allowed_block_types else "other"
+                        )
+                content_shape["block_types"] = sorted(block_types)
             tool_calls = message.get("tool_calls")
             message_shapes.append({
                 "role": message.get("role") if isinstance(message.get("role"), str) and message.get("role") in allowed_roles else "other",
@@ -281,6 +294,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("Expected an anonymized JSON object")
             anonymized_body["model"] = model_id
             final_body = json.dumps(anonymized_body).encode("utf-8")
+        except UnresolvedPlaceholderError:
+            self.send_error(
+                409,
+                "Anonymization mapping expired; start a new OpenCode chat session",
+            )
+            return
         except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, TypeError) as e:
             print(f"[Presidio Bridge Error] {e}", file=sys.stderr, flush=True)
             self.send_error(503, "Presidio anonymization unavailable")

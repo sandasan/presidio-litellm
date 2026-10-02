@@ -22,7 +22,10 @@ services:
     container_name: opencode-bridge
     volumes:
       - ./anonymizer_bridge.py:/app/anonymizer_bridge.py
+      - opencode-bridge-data:/var/lib/opencode-bridge
     command: python3 /app/anonymizer_bridge.py
+    environment:
+      - OPENCODE_MAPPING_TTL_SECONDS=${OPENCODE_MAPPING_TTL_SECONDS:-15552000}
     network_mode: "host" # Позволяет скрипту прозрачно слушать 127.0.0.1:4001 хоста и видеть presidio на 5001
     restart: unless-stopped
     depends_on:
@@ -186,5 +189,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  opencode-bridge-data:
   omniroute-data:
   open-webui-data:

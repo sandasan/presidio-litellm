@@ -4,8 +4,12 @@ import json
 import sys
 import re
 import codecs
-import threading
 import socket
+import hashlib
+import os
+import secrets
+import sqlite3
+import time
 import urllib.error
 import urllib.request
 import ssl
@@ -15,17 +19,184 @@ PRESIDIO_URL = "http://127.0.0.1:5001"
 OPENCODE_REAL_IP = "104.21.32.140"
 PLACEHOLDER_PATTERN = re.compile(r"<[A-Z][A-Z0-9_]*_\d+(?:_[0-9a-f]{32})?>")
 MEDIA_TYPES = {"image", "image_url", "input_image", "audio", "input_audio", "video", "file"}
-ENTITY_VALUE_TO_PLACEHOLDER = {}
-PLACEHOLDER_TO_ENTITY_VALUE = {}
-ENTITY_COUNTERS = {}
-ANONYMIZATION_LOCK = threading.Lock()
+MAPPING_DB_PATH = os.environ.get(
+    "OPENCODE_MAPPING_DB", "/var/lib/opencode-bridge/mappings.sqlite3"
+)
+MAPPING_TTL_SECONDS = int(os.environ.get("OPENCODE_MAPPING_TTL_SECONDS", "15552000"))
 
 
 class UnresolvedPlaceholderError(ValueError):
     """Raised when an old anonymization token has no local restore mapping."""
 
 
-def anonymize_from_results(text, analyzer_results, replacements):
+class MappingStore:
+    """Persist PII mappings per OpenCode session, including across bridge restarts."""
+
+    def __init__(self, path, ttl_seconds=MAPPING_TTL_SECONDS):
+        if ttl_seconds <= 0:
+            raise ValueError("Mapping TTL must be positive")
+        self.path = os.path.abspath(path)
+        self.ttl_seconds = ttl_seconds
+        os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
+        os.chmod(os.path.dirname(self.path), 0o700)
+        self._initialize()
+
+    def _connect(self):
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 30000")
+        return connection
+
+    def _initialize(self):
+        connection = self._connect()
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    parent_session_id TEXT,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS mappings (
+                    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                    placeholder TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    original_value TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (session_id, placeholder)
+                );
+                CREATE INDEX IF NOT EXISTS mappings_by_value
+                    ON mappings(session_id, entity_type, original_value);
+                """
+            )
+            os.chmod(self.path, 0o600)
+        finally:
+            connection.close()
+
+    def prepare_session(self, session_id, parent_session_id=None):
+        now = int(time.time())
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """INSERT INTO sessions(session_id, parent_session_id, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(session_id) DO UPDATE SET
+                       parent_session_id = COALESCE(excluded.parent_session_id,
+                                                    sessions.parent_session_id),
+                       updated_at = excluded.updated_at""",
+                (session_id, parent_session_id, now),
+            )
+            connection.execute(
+                "DELETE FROM sessions WHERE updated_at < ?",
+                (now - self.ttl_seconds,),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def get_or_create(self, session_id, entity_type, original_value):
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", entity_type):
+            raise ValueError("Invalid Presidio entity type")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT placeholder FROM mappings
+                   WHERE session_id = ? AND entity_type = ? AND original_value = ?
+                   ORDER BY created_at LIMIT 1""",
+                (session_id, entity_type, original_value),
+            ).fetchone()
+            if row is not None:
+                connection.commit()
+                return row[0]
+            placeholder = f"<{entity_type}_1_{secrets.token_hex(16)}>"
+            connection.execute(
+                """INSERT INTO mappings
+                   (session_id, placeholder, entity_type, original_value, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (session_id, placeholder, entity_type, original_value, int(time.time())),
+            )
+            connection.commit()
+            return placeholder
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def resolve(self, session_id, placeholder):
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """WITH RECURSIVE lineage(session_id, depth, path) AS (
+                       SELECT ?, 0, ',' || ? || ','
+                       UNION ALL
+                       SELECT sessions.parent_session_id, lineage.depth + 1,
+                              lineage.path || sessions.parent_session_id || ','
+                       FROM sessions JOIN lineage
+                         ON sessions.session_id = lineage.session_id
+                       WHERE sessions.parent_session_id IS NOT NULL
+                         AND lineage.depth < 32
+                         AND instr(lineage.path,
+                                   ',' || sessions.parent_session_id || ',') = 0
+                   )
+                   SELECT mappings.entity_type, mappings.original_value,
+                          mappings.session_id, lineage.depth
+                   FROM lineage JOIN mappings USING (session_id)
+                   WHERE mappings.placeholder = ?
+                   ORDER BY lineage.depth LIMIT 1""",
+                (session_id, session_id, placeholder),
+            ).fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            entity_type, original_value, _, depth = row
+            if depth:
+                connection.execute(
+                    """INSERT OR IGNORE INTO mappings
+                       (session_id, placeholder, entity_type, original_value, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (session_id, placeholder, entity_type, original_value, int(time.time())),
+                )
+            connection.commit()
+            return original_value
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+
+def session_key(raw_session_id):
+    return hashlib.sha256(raw_session_id.encode("utf-8")).hexdigest()
+
+
+def request_session_keys(headers):
+    raw_session_id = (
+        headers.get("x-opencode-session-id")
+        or headers.get("x-opencode-session")
+        or headers.get("x-session-affinity")
+        or headers.get("x-session-id")
+    )
+    raw_parent_id = (
+        headers.get("x-opencode-parent-session-id")
+        or headers.get("x-parent-session-id")
+    )
+    if not raw_session_id or len(raw_session_id) > 256:
+        return None, None
+    return (
+        session_key(raw_session_id),
+        session_key(raw_parent_id) if raw_parent_id and len(raw_parent_id) <= 256 else None,
+    )
+
+
+def anonymize_from_results(text, analyzer_results, replacements, mapping_store, session_id):
     """Replace detected values consistently and retain exact values for restoration."""
     spans = []
     for result in analyzer_results:
@@ -60,14 +231,7 @@ def anonymize_from_results(text, analyzer_results, replacements):
         start, end = result["start"], result["end"]
         entity_type = result["entity_type"]
         original_value = text[start:end]
-        mapping_key = (entity_type, original_value)
-        with ANONYMIZATION_LOCK:
-            placeholder = ENTITY_VALUE_TO_PLACEHOLDER.get(mapping_key)
-            if placeholder is None:
-                ENTITY_COUNTERS[entity_type] = ENTITY_COUNTERS.get(entity_type, 0) + 1
-                placeholder = f"<{entity_type}_{ENTITY_COUNTERS[entity_type]}>"
-                ENTITY_VALUE_TO_PLACEHOLDER[mapping_key] = placeholder
-                PLACEHOLDER_TO_ENTITY_VALUE[placeholder] = original_value
+        placeholder = mapping_store.get_or_create(session_id, entity_type, original_value)
         parts.extend((text[cursor:start], placeholder))
         replacements[placeholder] = original_value
         cursor = end
@@ -75,8 +239,8 @@ def anonymize_from_results(text, analyzer_results, replacements):
     return "".join(parts)
 
 
-def anonymize_text(text, replacements):
-    add_cached_replacements(text, replacements)
+def anonymize_text(text, replacements, mapping_store, session_id):
+    add_cached_replacements(text, replacements, mapping_store, session_id)
     detected_lang = "en"
     if re.search(r"[ҐґЄєІіЇї]", text):
         detected_lang = "uk"
@@ -95,14 +259,19 @@ def anonymize_text(text, replacements):
         raise ValueError("Invalid Presidio analyzer response")
     if not analyzer_results:
         return text
-    return anonymize_from_results(text, analyzer_results, replacements)
+    return anonymize_from_results(
+        text, analyzer_results, replacements, mapping_store, session_id
+    )
 
 
-def anonymize_value(value, replacements):
+def anonymize_value(value, replacements, mapping_store, session_id):
     if isinstance(value, str):
-        return anonymize_text(value, replacements)
+        return anonymize_text(value, replacements, mapping_store, session_id)
     if isinstance(value, list):
-        return [anonymize_value(item, replacements) for item in value]
+        return [
+            anonymize_value(item, replacements, mapping_store, session_id)
+            for item in value
+        ]
     if isinstance(value, dict):
         media_keys = {"image", "image_url", "input_image", "audio", "input_audio", "video", "file_data"}
         content_type = value.get("type")
@@ -112,16 +281,16 @@ def anonymize_value(value, replacements):
         if any(key.lower() in media_keys and item for key, item in value.items()):
             raise ValueError("Multimodal payload is not supported by the anonymizer")
         return {
-            anonymize_text(key, replacements): anonymize_value(item, replacements)
+            anonymize_text(key, replacements, mapping_store, session_id):
+            anonymize_value(item, replacements, mapping_store, session_id)
             for key, item in value.items()
         }
     return value
 
 
-def add_cached_replacements(text, replacements):
+def add_cached_replacements(text, replacements, mapping_store, session_id):
     for placeholder in PLACEHOLDER_PATTERN.findall(text):
-        with ANONYMIZATION_LOCK:
-            original_value = PLACEHOLDER_TO_ENTITY_VALUE.get(placeholder)
+        original_value = mapping_store.resolve(session_id, placeholder)
         if original_value is not None:
             replacements[placeholder] = original_value
             continue
@@ -298,8 +467,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(400, str(e))
             return
 
+        session_id, parent_session_id = request_session_keys(self.headers)
+        if session_id is None:
+            self.send_error(400, "Missing or invalid OpenCode session identifier")
+            return
+
         try:
-            anonymized_body = anonymize_value(body, replacements)
+            self.server.mapping_store.prepare_session(session_id, parent_session_id)
+            anonymized_body = anonymize_value(
+                body, replacements, self.server.mapping_store, session_id
+            )
             if not isinstance(anonymized_body, dict):
                 raise ValueError("Expected an anonymized JSON object")
             anonymized_body["model"] = model_id
@@ -307,10 +484,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         except UnresolvedPlaceholderError:
             self.send_error(
                 409,
-                "Anonymization mapping unavailable; start a new OpenCode chat session",
+                "Anonymization mapping unavailable or expired for this session",
             )
             return
-        except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError, TypeError) as e:
+        except (
+            urllib.error.URLError, OSError, sqlite3.Error,
+            http.client.HTTPException, ValueError, TypeError,
+        ) as e:
             print(f"[Presidio Bridge Error] {e}", file=sys.stderr, flush=True)
             self.send_error(503, "Presidio anonymization unavailable")
             return
@@ -373,5 +553,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 4001), ProxyHandler)
+    server.mapping_store = MappingStore(MAPPING_DB_PATH)
     print("Финальный автономный SSL-бридж анонимайзера запущен на порту 4001...")
     server.serve_forever()

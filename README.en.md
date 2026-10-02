@@ -13,6 +13,12 @@ All requests sent to cloud models pass through **Presidio**. Personal data such 
 email addresses, names, phone numbers, API keys, database connection strings, and
 internal IP addresses are masked before the request reaches a provider.
 
+When OpenCode uses the local anonymizer bridge, its restore mappings are scoped
+to the OpenCode session and persist in the `opencode-bridge-data` Docker volume
+across restarts. The volume contains original PII, is pruned after 180 days of
+session inactivity, and should not be shared. Set
+`OPENCODE_MAPPING_TTL_SECONDS` in `.env` to change the retention period.
+
 Published ports bind to this machine by default. Set
 `STACK_BIND_ADDRESS=0.0.0.0` in `.env` only when LAN access is required. Do not
 expose the APIs directly to the internet: LiteLLM accepts a dummy key and

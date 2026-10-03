@@ -22,19 +22,15 @@ MEDIA_TYPES = {"image", "image_url", "input_image", "audio", "input_audio", "vid
 MAPPING_DB_PATH = os.environ.get(
     "OPENCODE_MAPPING_DB", "/var/lib/opencode-bridge/mappings.sqlite3"
 )
-MAPPING_TTL_SECONDS = int(os.environ.get("OPENCODE_MAPPING_TTL_SECONDS", "15552000"))
-
-
-class UnresolvedPlaceholderError(ValueError):
-    """Raised when an old anonymization token has no local restore mapping."""
+MAPPING_TTL_SECONDS = int(os.environ.get("OPENCODE_MAPPING_TTL_SECONDS", "0"))
 
 
 class MappingStore:
     """Persist PII mappings per OpenCode session, including across bridge restarts."""
 
     def __init__(self, path, ttl_seconds=MAPPING_TTL_SECONDS):
-        if ttl_seconds <= 0:
-            raise ValueError("Mapping TTL must be positive")
+        if ttl_seconds < 0:
+            raise ValueError("Mapping TTL cannot be negative")
         self.path = os.path.abspath(path)
         self.ttl_seconds = ttl_seconds
         os.makedirs(os.path.dirname(self.path), mode=0o700, exist_ok=True)
@@ -88,10 +84,11 @@ class MappingStore:
                        updated_at = excluded.updated_at""",
                 (session_id, parent_session_id, now),
             )
-            connection.execute(
-                "DELETE FROM sessions WHERE updated_at < ?",
-                (now - self.ttl_seconds,),
-            )
+            if self.ttl_seconds:
+                connection.execute(
+                    "DELETE FROM sessions WHERE updated_at < ?",
+                    (now - self.ttl_seconds,),
+                )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -293,10 +290,6 @@ def add_cached_replacements(text, replacements, mapping_store, session_id):
         original_value = mapping_store.resolve(session_id, placeholder)
         if original_value is not None:
             replacements[placeholder] = original_value
-            continue
-        raise UnresolvedPlaceholderError(
-            "An anonymization token has no local restore mapping"
-        )
 
 
 def normalize_model_id(model):
@@ -481,12 +474,6 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("Expected an anonymized JSON object")
             anonymized_body["model"] = model_id
             final_body = json.dumps(anonymized_body).encode("utf-8")
-        except UnresolvedPlaceholderError:
-            self.send_error(
-                409,
-                "Anonymization mapping unavailable or expired for this session",
-            )
-            return
         except (
             urllib.error.URLError, OSError, sqlite3.Error,
             http.client.HTTPException, ValueError, TypeError,

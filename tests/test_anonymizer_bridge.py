@@ -1,9 +1,9 @@
+import sqlite3
 import tempfile
 import unittest
 
 from anonymizer_bridge import (
     MappingStore,
-    UnresolvedPlaceholderError,
     add_cached_replacements,
     anonymize_from_results,
     session_key,
@@ -52,14 +52,42 @@ class MappingStoreTests(unittest.TestCase):
         self.assertEqual(replacements[placeholder], "Alice")
         self.assertEqual(repeated, placeholder)
 
+    def test_mapping_does_not_expire_when_ttl_is_disabled(self):
+        store = MappingStore(self.database, ttl_seconds=0)
+        current_key = self.prepare(store, "session-a")
+        placeholder = self.create_person_token(store, current_key)
+
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "UPDATE sessions SET updated_at = 0 WHERE session_id = ?",
+                (current_key,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        self.prepare(store, "another-session")
+        self.assertEqual(store.resolve(current_key, placeholder), "Alice")
+
     def test_mapping_is_not_shared_between_sessions(self):
         store = self.new_store()
         first_key = self.prepare(store, "session-a")
         placeholder = self.create_person_token(store, first_key)
         second_key = self.prepare(store, "session-b")
 
-        with self.assertRaises(UnresolvedPlaceholderError):
-            add_cached_replacements(placeholder, {}, store, second_key)
+        replacements = {}
+        add_cached_replacements(placeholder, replacements, store, second_key)
+        self.assertEqual(replacements, {})
+
+    def test_unknown_legacy_placeholder_is_preserved_without_mapping(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+        replacements = {}
+
+        add_cached_replacements("<PERSON_1>", replacements, store, current_key)
+
+        self.assertEqual(replacements, {})
 
     def test_forked_session_inherits_parent_mappings(self):
         store = self.new_store()

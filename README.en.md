@@ -15,9 +15,12 @@ internal IP addresses are masked before the request reaches a provider.
 
 When OpenCode uses the local anonymizer bridge, its restore mappings are scoped
 to the OpenCode session and persist in the `opencode-bridge-data` Docker volume
-across restarts. The volume contains original PII, is pruned after 180 days of
-session inactivity, and should not be shared. Set
-`OPENCODE_MAPPING_TTL_SECONDS` in `.env` to change the retention period.
+across restarts. The volume contains original PII and should not be shared.
+Mappings are retained indefinitely by default. Set a positive retention period
+in seconds with `OPENCODE_MAPPING_TTL_SECONDS` in `.env` to enable cleanup; `0`
+disables expiration.
+If a legacy placeholder has no mapping, the request continues with the opaque
+token; its original value cannot be recovered without a database entry.
 
 Published ports bind to this machine by default. Set
 `STACK_BIND_ADDRESS=0.0.0.0` in `.env` only when LAN access is required. Do not

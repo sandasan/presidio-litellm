@@ -25,7 +25,7 @@ services:
       - opencode-bridge-data:/var/lib/opencode-bridge
     command: python3 /app/anonymizer_bridge.py
     environment:
-      - OPENCODE_MAPPING_TTL_SECONDS=${OPENCODE_MAPPING_TTL_SECONDS:-15552000}
+      - OPENCODE_MAPPING_TTL_SECONDS=${OPENCODE_MAPPING_TTL_SECONDS:-0}
     network_mode: "host" # Позволяет скрипту прозрачно слушать 127.0.0.1:4001 хоста и видеть presidio на 5001
     restart: unless-stopped
     depends_on:

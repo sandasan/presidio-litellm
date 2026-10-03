@@ -52,6 +52,82 @@ class MappingStoreTests(unittest.TestCase):
         self.assertEqual(replacements[placeholder], "Alice")
         self.assertEqual(repeated, placeholder)
 
+    def test_new_placeholders_are_sequential_and_stable(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+
+        first = store.get_or_create(current_key, "URL", "https://example.test/a")
+        second = store.get_or_create(current_key, "URL", "https://example.test/b")
+        repeated = store.get_or_create(current_key, "URL", "https://example.test/a")
+
+        self.assertEqual(first, "<URL_1>")
+        self.assertEqual(second, "<URL_2>")
+        self.assertEqual(repeated, first)
+
+    def test_placeholder_indices_are_unique_across_sessions(self):
+        store = self.new_store()
+        first_key = self.prepare(store, "session-a")
+        second_key = self.prepare(store, "session-b")
+
+        first = store.get_or_create(first_key, "PERSON", "Alice")
+        second = store.get_or_create(second_key, "PERSON", "Bob")
+
+        self.assertEqual(first, "<PERSON_1>")
+        self.assertEqual(second, "<PERSON_2>")
+
+    def test_legacy_uuid_placeholders_are_normalized(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+        legacy_tokens = {
+            "<ORG_ANALYSIS_EMAIL_7806dbcd2fe47a57b7c7d51a1f5f81e7>": (
+                "ORG_ANALYSIS_EMAIL",
+                "analysis@example.test",
+            ),
+            "<URL_1_abcdef0123456789abcdef0123456789>": (
+                "URL",
+                "https://example.test/private",
+            ),
+        }
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.executemany(
+                """INSERT INTO mappings
+                   (session_id, placeholder, entity_type, original_value, created_at)
+                   VALUES (?, ?, ?, ?, 1)""",
+                [
+                    (current_key, token, entity_type, original_value)
+                    for token, (entity_type, original_value) in legacy_tokens.items()
+                ],
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        replacements = {}
+        normalized = add_cached_replacements(
+            " ".join(legacy_tokens), replacements, store, current_key
+        )
+
+        self.assertEqual(
+            normalized,
+            "<ORG_ANALYSIS_EMAIL_1> <URL_2>",
+        )
+        self.assertEqual(replacements["<ORG_ANALYSIS_EMAIL_1>"], "analysis@example.test")
+        self.assertEqual(replacements["<URL_2>"], "https://example.test/private")
+
+    def test_unmapped_legacy_uuid_is_normalized_without_leaking_it(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+        legacy = "<PERSON_abcdef0123456789abcdef0123456789>"
+
+        replacements = {}
+        normalized = add_cached_replacements(legacy, replacements, store, current_key)
+        repeated = add_cached_replacements(legacy, {}, store, current_key)
+
+        self.assertEqual(normalized, "<PERSON_1>")
+        self.assertEqual(repeated, normalized)
+        self.assertEqual(replacements, {})
+
     def test_mapping_does_not_expire_when_ttl_is_disabled(self):
         store = MappingStore(self.database, ttl_seconds=0)
         current_key = self.prepare(store, "session-a")

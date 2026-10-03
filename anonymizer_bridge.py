@@ -7,7 +7,6 @@ import codecs
 import socket
 import hashlib
 import os
-import secrets
 import sqlite3
 import time
 import urllib.error
@@ -17,7 +16,12 @@ import http.client
 
 PRESIDIO_URL = "http://127.0.0.1:5001"
 OPENCODE_REAL_IP = "104.21.32.140"
-PLACEHOLDER_PATTERN = re.compile(r"<[A-Z][A-Z0-9_]*_\d+(?:_[0-9a-f]{32})?>")
+PLACEHOLDER_PATTERN = re.compile(
+    r"<[A-Z][A-Z0-9_]*_(?:\d+(?:_[0-9a-f]{32})?|[0-9a-f]{32})>"
+)
+LEGACY_UUID_PLACEHOLDER_PATTERN = re.compile(
+    r"<(?P<entity>[A-Z][A-Z0-9_]*?)_(?:(?P<index>\d+)_)?(?P<uuid>[0-9a-f]{32})>"
+)
 MEDIA_TYPES = {"image", "image_url", "input_image", "audio", "input_audio", "video", "file"}
 MAPPING_DB_PATH = os.environ.get(
     "OPENCODE_MAPPING_DB", "/var/lib/opencode-bridge/mappings.sqlite3"
@@ -64,6 +68,10 @@ class MappingStore:
                 );
                 CREATE INDEX IF NOT EXISTS mappings_by_value
                     ON mappings(session_id, entity_type, original_value);
+                CREATE TABLE IF NOT EXISTS placeholder_counters (
+                    entity_type TEXT PRIMARY KEY,
+                    last_value INTEGER NOT NULL
+                );
                 """
             )
             os.chmod(self.path, 0o600)
@@ -102,16 +110,49 @@ class MappingStore:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
+            rows = connection.execute(
                 """SELECT placeholder FROM mappings
                    WHERE session_id = ? AND entity_type = ? AND original_value = ?
                    ORDER BY created_at LIMIT 1""",
                 (session_id, entity_type, original_value),
+            ).fetchall()
+            canonical_pattern = re.compile(rf"<{re.escape(entity_type)}_\d+>")
+            for row in rows:
+                if canonical_pattern.fullmatch(row[0]):
+                    connection.commit()
+                    return row[0]
+
+            counter = connection.execute(
+                "SELECT last_value FROM placeholder_counters WHERE entity_type = ?",
+                (entity_type,),
             ).fetchone()
-            if row is not None:
-                connection.commit()
-                return row[0]
-            placeholder = f"<{entity_type}_1_{secrets.token_hex(16)}>"
+            if counter is None:
+                numeric_pattern = re.compile(
+                    rf"<{re.escape(entity_type)}_(\d+)(?:_[0-9a-f]{{32}})?>"
+                )
+                existing = connection.execute(
+                    "SELECT placeholder FROM mappings WHERE entity_type = ?",
+                    (entity_type,),
+                ).fetchall()
+                last_value = max(
+                    (
+                        int(match.group(1))
+                        for row in existing
+                        if (match := numeric_pattern.fullmatch(row[0]))
+                    ),
+                    default=0,
+                )
+            else:
+                last_value = counter[0]
+            next_value = last_value + 1
+            connection.execute(
+                """INSERT INTO placeholder_counters(entity_type, last_value)
+                   VALUES (?, ?)
+                   ON CONFLICT(entity_type) DO UPDATE SET
+                       last_value = excluded.last_value""",
+                (entity_type, next_value),
+            )
+            placeholder = f"<{entity_type}_{next_value}>"
             connection.execute(
                 """INSERT INTO mappings
                    (session_id, placeholder, entity_type, original_value, created_at)
@@ -237,7 +278,7 @@ def anonymize_from_results(text, analyzer_results, replacements, mapping_store, 
 
 
 def anonymize_text(text, replacements, mapping_store, session_id):
-    add_cached_replacements(text, replacements, mapping_store, session_id)
+    text = add_cached_replacements(text, replacements, mapping_store, session_id)
     detected_lang = "en"
     if re.search(r"[ҐґЄєІіЇї]", text):
         detected_lang = "uk"
@@ -286,10 +327,28 @@ def anonymize_value(value, replacements, mapping_store, session_id):
 
 
 def add_cached_replacements(text, replacements, mapping_store, session_id):
-    for placeholder in PLACEHOLDER_PATTERN.findall(text):
+    for placeholder in dict.fromkeys(PLACEHOLDER_PATTERN.findall(text)):
         original_value = mapping_store.resolve(session_id, placeholder)
-        if original_value is not None:
+        legacy_match = LEGACY_UUID_PLACEHOLDER_PATTERN.fullmatch(placeholder)
+        if legacy_match is not None:
+            entity_type = legacy_match.group("entity")
+            if original_value is None:
+                original_value = placeholder
+            elif LEGACY_UUID_PLACEHOLDER_PATTERN.fullmatch(original_value) is None:
+                replacements[placeholder] = original_value
+
+            canonical = mapping_store.get_or_create(
+                session_id, entity_type, original_value
+            )
+            if LEGACY_UUID_PLACEHOLDER_PATTERN.fullmatch(original_value) is None:
+                replacements[canonical] = original_value
+            text = text.replace(placeholder, canonical)
+        elif (
+            original_value is not None
+            and LEGACY_UUID_PLACEHOLDER_PATTERN.fullmatch(original_value) is None
+        ):
             replacements[placeholder] = original_value
+    return text
 
 
 def normalize_model_id(model):

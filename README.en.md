@@ -19,10 +19,18 @@ across restarts. The volume contains original PII and should not be shared.
 Mappings are retained indefinitely by default. Set a positive retention period
 in seconds with `OPENCODE_MAPPING_TTL_SECONDS` in `.env` to enable cleanup; `0`
 disables expiration.
+New placeholders include a short session namespace and use independent
+per-session counters. When a tool call contains an unknown token, the bridge
+retries up to twice; configure `OPENCODE_UNRESOLVED_TOOL_RETRIES` in `.env` or
+set it to `0` to disable retries.
 The Presidio analysis timeout defaults to 60 seconds and can be changed with
 `PRESIDIO_ANALYZE_TIMEOUT_SECONDS` in `.env`.
-If a legacy placeholder has no mapping, the request continues with the opaque
-token; its original value cannot be recovered without a database entry.
+An incoming placeholder without a mapping is replaced with an explicit marker.
+For an unknown token, the bridge retries the request up to the configured limit
+and asks the model to find the real path without inventing placeholders. If
+retries are exhausted, only the unsafe call is withheld and the stream ends with
+a normal assistant message instead of a broken connection. The original value
+cannot be recovered without a mapping.
 
 Published ports bind to this machine by default. Set
 `STACK_BIND_ADDRESS=0.0.0.0` in `.env` only when LAN access is required. Do not

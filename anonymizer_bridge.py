@@ -4,6 +4,7 @@ import json
 import sys
 import re
 import codecs
+import copy
 import socket
 import hashlib
 import os
@@ -24,16 +25,25 @@ if PRESIDIO_ANALYZE_TIMEOUT_SECONDS <= 0:
     raise ValueError("Presidio analyze timeout must be positive")
 OPENCODE_REAL_IP = "104.21.32.140"
 PLACEHOLDER_PATTERN = re.compile(
-    r"<[A-Z][A-Z0-9_]*_(?:\d+(?:_[0-9a-f]{32})?|[0-9a-f]{32})>"
+    r"<[A-Z][A-Z0-9_]*_(?:S[0-9a-f]{12}_\d+|\d+(?:_[0-9a-f]{32})?|[0-9a-f]{32})>"
+)
+SESSION_PLACEHOLDER_PATTERN = re.compile(
+    r"<(?P<entity>[A-Z][A-Z0-9_]*?)_S(?P<session>[0-9a-f]{12})_(?P<index>\d+)>"
 )
 LEGACY_UUID_PLACEHOLDER_PATTERN = re.compile(
     r"<(?P<entity>[A-Z][A-Z0-9_]*?)_(?:(?P<index>\d+)_)?(?P<uuid>[0-9a-f]{32})>"
 )
+UNRESOLVED_PLACEHOLDER = "[unresolved anonymization placeholder]"
 MEDIA_TYPES = {"image", "image_url", "input_image", "audio", "input_audio", "video", "file"}
 MAPPING_DB_PATH = os.environ.get(
     "OPENCODE_MAPPING_DB", "/var/lib/opencode-bridge/mappings.sqlite3"
 )
 MAPPING_TTL_SECONDS = int(os.environ.get("OPENCODE_MAPPING_TTL_SECONDS", "0"))
+MAX_UNRESOLVED_TOOL_RETRIES = int(
+    os.environ.get("OPENCODE_UNRESOLVED_TOOL_RETRIES", "2")
+)
+if MAX_UNRESOLVED_TOOL_RETRIES < 0:
+    raise ValueError("Unresolved tool retry count cannot be negative")
 
 
 class MappingStore:
@@ -79,6 +89,12 @@ class MappingStore:
                     entity_type TEXT PRIMARY KEY,
                     last_value INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS session_placeholder_counters (
+                    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                    entity_type TEXT NOT NULL,
+                    last_value INTEGER NOT NULL,
+                    PRIMARY KEY (session_id, entity_type)
+                );
                 """
             )
             os.chmod(self.path, 0o600)
@@ -123,29 +139,37 @@ class MappingStore:
                    ORDER BY created_at LIMIT 1""",
                 (session_id, entity_type, original_value),
             ).fetchall()
-            canonical_pattern = re.compile(rf"<{re.escape(entity_type)}_\d+>")
+            session_namespace = session_id[:12]
+            canonical_pattern = re.compile(
+                rf"<{re.escape(entity_type)}_S{session_namespace}_\d+>"
+            )
             for row in rows:
                 if canonical_pattern.fullmatch(row[0]):
                     connection.commit()
                     return row[0]
 
             counter = connection.execute(
-                "SELECT last_value FROM placeholder_counters WHERE entity_type = ?",
-                (entity_type,),
+                """SELECT last_value FROM session_placeholder_counters
+                   WHERE session_id = ? AND entity_type = ?""",
+                (session_id, entity_type),
             ).fetchone()
             if counter is None:
-                numeric_pattern = re.compile(
-                    rf"<{re.escape(entity_type)}_(\d+)(?:_[0-9a-f]{{32}})?>"
+                numeric_pattern = re.compile(rf"<{re.escape(entity_type)}_(\d+)(?:_[0-9a-f]{{32}})?>")
+                session_pattern = re.compile(
+                    rf"<{re.escape(entity_type)}_S{session_namespace}_(\d+)>"
                 )
                 existing = connection.execute(
-                    "SELECT placeholder FROM mappings WHERE entity_type = ?",
-                    (entity_type,),
+                    "SELECT placeholder FROM mappings WHERE session_id = ? AND entity_type = ?",
+                    (session_id, entity_type),
                 ).fetchall()
                 last_value = max(
                     (
                         int(match.group(1))
                         for row in existing
-                        if (match := numeric_pattern.fullmatch(row[0]))
+                        if (match := (
+                            session_pattern.fullmatch(row[0])
+                            or numeric_pattern.fullmatch(row[0])
+                        ))
                     ),
                     default=0,
                 )
@@ -153,13 +177,14 @@ class MappingStore:
                 last_value = counter[0]
             next_value = last_value + 1
             connection.execute(
-                """INSERT INTO placeholder_counters(entity_type, last_value)
-                   VALUES (?, ?)
-                   ON CONFLICT(entity_type) DO UPDATE SET
+                """INSERT INTO session_placeholder_counters
+                   (session_id, entity_type, last_value)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(session_id, entity_type) DO UPDATE SET
                        last_value = excluded.last_value""",
-                (entity_type, next_value),
+                (session_id, entity_type, next_value),
             )
-            placeholder = f"<{entity_type}_{next_value}>"
+            placeholder = f"<{entity_type}_S{session_namespace}_{next_value}>"
             connection.execute(
                 """INSERT INTO mappings
                    (session_id, placeholder, entity_type, original_value, created_at)
@@ -461,21 +486,22 @@ def add_cached_replacements(text, replacements, mapping_store, session_id):
         legacy_match = LEGACY_UUID_PLACEHOLDER_PATTERN.fullmatch(placeholder)
         if legacy_match is not None:
             entity_type = legacy_match.group("entity")
-            if original_value is None:
-                original_value = placeholder
-            elif LEGACY_UUID_PLACEHOLDER_PATTERN.fullmatch(original_value) is None:
-                replacements[placeholder] = original_value
+            if (
+                original_value is None
+                or LEGACY_UUID_PLACEHOLDER_PATTERN.fullmatch(original_value) is not None
+            ):
+                text = text.replace(placeholder, UNRESOLVED_PLACEHOLDER)
+                continue
 
             canonical = mapping_store.get_or_create(
                 session_id, entity_type, original_value
             )
-            if LEGACY_UUID_PLACEHOLDER_PATTERN.fullmatch(original_value) is None:
-                replacements[canonical] = original_value
+            replacements[placeholder] = original_value
+            replacements[canonical] = original_value
             text = text.replace(placeholder, canonical)
-        elif (
-            original_value is not None
-            and LEGACY_UUID_PLACEHOLDER_PATTERN.fullmatch(original_value) is None
-        ):
+        elif original_value is None:
+            text = text.replace(placeholder, UNRESOLVED_PLACEHOLDER)
+        elif LEGACY_UUID_PLACEHOLDER_PATTERN.fullmatch(original_value) is None:
             replacements[placeholder] = original_value
     return text
 
@@ -506,15 +532,19 @@ def validate_chat_request(body, path):
 
 
 def restore_text(text, replacements):
-    for placeholder, original_value in replacements.items():
-        text = text.replace(placeholder, original_value)
-    return text
+    def replace_placeholder(match):
+        original_value = replacements.get(match.group(0))
+        if original_value is None:
+            return UNRESOLVED_PLACEHOLDER
+        return json.dumps(original_value, ensure_ascii=False)[1:-1]
+
+    return PLACEHOLDER_PATTERN.sub(replace_placeholder, text)
 
 
 def restored_chunks(response, replacements):
     """Restore placeholders even when their bytes cross response chunk boundaries."""
     decoder = codecs.getincrementaldecoder("utf-8")()
-    tail_length = max((len(key) for key in replacements), default=1) - 1
+    tail_length = max(255, max((len(key) for key in replacements), default=1) - 1)
     pending = ""
     while True:
         chunk = response.read1(4096)
@@ -536,6 +566,267 @@ def restored_chunks(response, replacements):
         pending = combined[split_at:]
     pending += decoder.decode(b"", final=True)
     yield restore_text(pending, replacements)
+
+
+def sse_payload(frame):
+    data_lines = [line[5:].lstrip() for line in frame.splitlines() if line.startswith("data:")]
+    if not data_lines:
+        return None
+    data = "\n".join(data_lines)
+    if data == "[DONE]":
+        return data
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError:
+        return None
+
+
+def is_tool_call_delta(payload):
+    if not isinstance(payload, dict):
+        return False
+    return any(
+        isinstance(choice, dict)
+        and isinstance(choice.get("delta"), dict)
+        and any(key in choice["delta"] for key in ("tool_calls", "function_call"))
+        for choice in payload.get("choices", [])
+    )
+
+
+def is_terminal_sse_payload(payload):
+    if payload == "[DONE]":
+        return True
+    if not isinstance(payload, dict):
+        return False
+    return any(
+        isinstance(choice, dict) and choice.get("finish_reason") is not None
+        for choice in payload.get("choices", [])
+    )
+
+
+def blocked_tool_call_frame(template_frame, message):
+    payload = sse_payload(template_frame)
+    base = {
+        key: value
+        for key, value in (payload.items() if isinstance(payload, dict) else [])
+        if key != "choices"
+    }
+    base.setdefault("object", "chat.completion.chunk")
+    base.setdefault("created", int(time.time()))
+    choices = payload.get("choices", []) if isinstance(payload, dict) else []
+    choice_index = choices[0].get("index", 0) if choices and isinstance(choices[0], dict) else 0
+    base["choices"] = [
+        {
+            "index": choice_index,
+            "delta": {"content": message},
+            "finish_reason": "stop",
+        }
+    ]
+    return "data: " + json.dumps(base, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+
+
+def process_sse_frame(frame, buffered_tool_frames):
+    payload = sse_payload(frame)
+    if buffered_tool_frames or is_tool_call_delta(payload):
+        buffered = buffered_tool_frames + [frame]
+        if not is_terminal_sse_payload(payload):
+            return [], buffered, False, None
+        if any(UNRESOLVED_PLACEHOLDER in item for item in buffered):
+            return [], [], False, buffered
+        return buffered, [], payload == "[DONE]", None
+    return [frame], [], payload == "[DONE]", None
+
+
+def build_tool_retry_body(body, assistant_content):
+    if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+        return None
+    retry_body = copy.deepcopy(body)
+    if assistant_content:
+        retry_body["messages"].append(
+            {"role": "assistant", "content": assistant_content}
+        )
+    retry_body["messages"].append(
+        {
+            "role": "user",
+            "content": (
+                "A local privacy guard withheld your previous tool call because an argument "
+                "contained an unresolved anonymization marker. The tool did not run. "
+                "Do not repeat or invent placeholders. Find the real path/value from the "
+                "available context using safe local search tools; if it cannot be established, "
+                "ask the user. Continue the task and do not repeat completed narration."
+            ),
+        }
+    )
+    return retry_body
+
+
+def frame_assistant_text(frame):
+    payload = sse_payload(frame)
+    if not isinstance(payload, dict):
+        return ""
+    texts = []
+    for choice in payload.get("choices", []):
+        delta = choice.get("delta") if isinstance(choice, dict) else None
+        content = delta.get("content") if isinstance(delta, dict) else None
+        if isinstance(content, str):
+            texts.append(content)
+    return "".join(texts)
+
+
+def tool_rejection_chunks(tool_frames, retries_exhausted=False):
+    template = next(
+        (item for item in tool_frames if isinstance(sse_payload(item), dict)),
+        tool_frames[0],
+    )
+    message = (
+        "\n[Tool call withheld after automatic retries: the required path or value "
+        "could not be recovered. Please provide it or ask the agent to search locally.]"
+        if retries_exhausted
+        else "\n[Tool call withheld: unable to retry safely.]"
+    )
+    return [blocked_tool_call_frame(template, message), "data: [DONE]\n\n"]
+
+
+def guarded_stream_chunks(
+    response,
+    replacements,
+    request_body=None,
+    retry_upstream=None,
+    max_retries=MAX_UNRESOLVED_TOOL_RETRIES,
+):
+    retry_count = 0
+    current_body = request_body
+
+    while True:
+        pending = ""
+        buffered_tool_frames = []
+        assistant_content = []
+        retry_frames = None
+        done = False
+
+        for chunk in restored_chunks(response, replacements):
+            pending += chunk
+            while True:
+                boundary = re.search(r"\r?\n\r?\n", pending)
+                if boundary is None:
+                    break
+                frame = pending[:boundary.start()] + boundary.group(0)
+                pending = pending[boundary.end():]
+                output, buffered_tool_frames, frame_done, rejected = process_sse_frame(
+                    frame, buffered_tool_frames
+                )
+                if rejected is not None:
+                    retry_frames = rejected
+                    break
+                for output_frame in output:
+                    assistant_content.append(frame_assistant_text(output_frame))
+                    yield output_frame
+                if frame_done:
+                    done = True
+                    break
+            if retry_frames is not None or done:
+                break
+
+        if retry_frames is None and not done and pending:
+            output, buffered_tool_frames, frame_done, rejected = process_sse_frame(
+                pending, buffered_tool_frames
+            )
+            if rejected is not None:
+                retry_frames = rejected
+            else:
+                for output_frame in output:
+                    assistant_content.append(frame_assistant_text(output_frame))
+                    yield output_frame
+                done = frame_done
+
+        if done:
+            return
+
+        if retry_frames is None and buffered_tool_frames:
+            retry_frames = buffered_tool_frames
+
+        if retry_frames is None:
+            return
+
+        response.close()
+        retry_body = build_tool_retry_body(current_body, "".join(assistant_content))
+        if retry_count >= max_retries or retry_body is None or retry_upstream is None:
+            yield from tool_rejection_chunks(retry_frames, retries_exhausted=True)
+            return
+
+        try:
+            response = retry_upstream(retry_body)
+        except Exception as error:
+            print(
+                f"[Tool repair retry failed] {type(error).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+            yield from tool_rejection_chunks(retry_frames)
+            return
+        if response is None:
+            yield from tool_rejection_chunks(retry_frames)
+            return
+
+        current_body = retry_body
+        retry_count += 1
+
+
+def contains_unresolved_placeholder(value, replacements):
+    if isinstance(value, str):
+        return UNRESOLVED_PLACEHOLDER in value or any(
+            placeholder not in replacements for placeholder in PLACEHOLDER_PATTERN.findall(value)
+        )
+    if isinstance(value, list):
+        return any(contains_unresolved_placeholder(item, replacements) for item in value)
+    if isinstance(value, dict):
+        return any(
+            contains_unresolved_placeholder(key, replacements)
+            or contains_unresolved_placeholder(item, replacements)
+            for key, item in value.items()
+        )
+    return False
+
+
+def restore_json_value(value, replacements):
+    if isinstance(value, str):
+        return PLACEHOLDER_PATTERN.sub(
+            lambda match: replacements.get(match.group(0), UNRESOLVED_PLACEHOLDER),
+            value,
+        )
+    if isinstance(value, list):
+        return [restore_json_value(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {
+            restore_json_value(key, replacements): restore_json_value(item, replacements)
+            for key, item in value.items()
+        }
+    return value
+
+
+def restore_nonstream_response(response_body, replacements):
+    payload = json.loads(response_body.decode("utf-8"))
+    choices = payload.get("choices", []) if isinstance(payload, dict) else []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            continue
+        tool_fields = {
+            key: message[key]
+            for key in ("tool_calls", "function_call")
+            if key in message
+        }
+        if tool_fields and contains_unresolved_placeholder(tool_fields, replacements):
+            message.pop("tool_calls", None)
+            message.pop("function_call", None)
+            message["content"] = (message.get("content") or "") + (
+                "\n[Tool call withheld: an anonymization mapping is unavailable. "
+                "Retry after restoring the original value or path.]"
+            )
+            choice["finish_reason"] = "stop"
+    restored = restore_json_value(payload, replacements)
+    return json.dumps(restored, ensure_ascii=False).encode("utf-8")
 
 
 def safe_diagnostic_label(value):
@@ -679,17 +970,54 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), BoundHTTPSHandler)
         req = urllib.request.Request(url, data=final_body, headers=upstream_headers, method="POST")
 
+        def retry_upstream(retry_body):
+            retry_replacements = replacements
+            anonymized_retry_body = anonymize_value(
+                retry_body,
+                retry_replacements,
+                self.server.mapping_store,
+                session_id,
+            )
+            if not isinstance(anonymized_retry_body, dict):
+                raise ValueError("Expected a retried JSON request object")
+            anonymized_retry_body["model"] = model_id
+            retry_data = json.dumps(anonymized_retry_body).encode("utf-8")
+            retry_headers = dict(upstream_headers)
+            retry_headers["Content-Length"] = str(len(retry_data))
+            retry_request = urllib.request.Request(
+                url, data=retry_data, headers=retry_headers, method="POST"
+            )
+            return opener.open(retry_request)
+
         try:
             with opener.open(req) as response:
-                self.send_response(response.status)
-                for k, v in response.getheaders():
-                    if k.lower() not in ['content-encoding', 'transfer-encoding', 'content-length']:
-                        self.send_header(k, v)
-                self.end_headers()
+                content_type = response.headers.get("Content-Type", "").lower()
+                if "text/event-stream" in content_type:
+                    self.send_response(response.status)
+                    for k, v in response.getheaders():
+                        if k.lower() not in ['content-encoding', 'transfer-encoding', 'content-length']:
+                            self.send_header(k, v)
+                    self.end_headers()
 
-                for chunk_str in restored_chunks(response, replacements):
-                    self.wfile.write(chunk_str.encode('utf-8'))
-                    self.wfile.flush()
+                    for chunk_str in guarded_stream_chunks(
+                        response,
+                        replacements,
+                        request_body=body,
+                        retry_upstream=retry_upstream,
+                    ):
+                        self.wfile.write(chunk_str.encode('utf-8'))
+                        self.wfile.flush()
+                else:
+                    restored_body = restore_nonstream_response(
+                        response.read(), replacements
+                    )
+                    self.send_response(response.status)
+                    for k, v in response.getheaders():
+                        if k.lower() not in ['content-encoding', 'transfer-encoding', 'content-length']:
+                            self.send_header(k, v)
+                    self.send_header("Content-Length", str(len(restored_body)))
+                    self.end_headers()
+                    self.wfile.write(restored_body)
 
         except urllib.error.HTTPError as e:
             error_body = e.read()

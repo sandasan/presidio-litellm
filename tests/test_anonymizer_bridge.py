@@ -14,6 +14,10 @@ from anonymizer_bridge import (
     anonymize_text,
     anonymize_from_results,
     anonymize_value,
+    restore_text,
+    restore_nonstream_response,
+    restored_chunks,
+    guarded_stream_chunks,
     session_key,
 )
 
@@ -68,8 +72,9 @@ class MappingStoreTests(unittest.TestCase):
         second = store.get_or_create(current_key, "URL", "https://example.test/b")
         repeated = store.get_or_create(current_key, "URL", "https://example.test/a")
 
-        self.assertEqual(first, "<URL_1>")
-        self.assertEqual(second, "<URL_2>")
+        session_namespace = current_key[:12]
+        self.assertEqual(first, f"<URL_S{session_namespace}_1>")
+        self.assertEqual(second, f"<URL_S{session_namespace}_2>")
         self.assertEqual(repeated, first)
 
     def test_placeholder_indices_are_unique_across_sessions(self):
@@ -80,8 +85,9 @@ class MappingStoreTests(unittest.TestCase):
         first = store.get_or_create(first_key, "PERSON", "Alice")
         second = store.get_or_create(second_key, "PERSON", "Bob")
 
-        self.assertEqual(first, "<PERSON_1>")
-        self.assertEqual(second, "<PERSON_2>")
+        self.assertEqual(first, f"<PERSON_S{first_key[:12]}_1>")
+        self.assertEqual(second, f"<PERSON_S{second_key[:12]}_1>")
+        self.assertNotEqual(first, second)
 
     def test_legacy_uuid_placeholders_are_normalized(self):
         store = self.new_store()
@@ -118,10 +124,16 @@ class MappingStoreTests(unittest.TestCase):
 
         self.assertEqual(
             normalized,
-            "<ORG_ANALYSIS_EMAIL_1> <URL_2>",
+            f"<ORG_ANALYSIS_EMAIL_S{current_key[:12]}_1> <URL_S{current_key[:12]}_2>",
         )
-        self.assertEqual(replacements["<ORG_ANALYSIS_EMAIL_1>"], "analysis@example.test")
-        self.assertEqual(replacements["<URL_2>"], "https://example.test/private")
+        self.assertEqual(
+            replacements[f"<ORG_ANALYSIS_EMAIL_S{current_key[:12]}_1>"],
+            "analysis@example.test",
+        )
+        self.assertEqual(
+            replacements[f"<URL_S{current_key[:12]}_2>"],
+            "https://example.test/private",
+        )
 
     def test_unmapped_legacy_uuid_is_normalized_without_leaking_it(self):
         store = self.new_store()
@@ -132,9 +144,154 @@ class MappingStoreTests(unittest.TestCase):
         normalized = add_cached_replacements(legacy, replacements, store, current_key)
         repeated = add_cached_replacements(legacy, {}, store, current_key)
 
-        self.assertEqual(normalized, "<PERSON_1>")
+        self.assertEqual(normalized, "[unresolved anonymization placeholder]")
         self.assertEqual(repeated, normalized)
         self.assertEqual(replacements, {})
+        self.assertIsNone(store.resolve(current_key, "<PERSON_1>"))
+
+    def test_unknown_model_placeholder_becomes_safe_marker(self):
+        for response_text in (
+            '{"path":"<US_DRIVER_LICENSE_136>.php"}',
+            '{"path":"[unresolved anonymization placeholder].php"}',
+        ):
+            with self.subTest(response_text=response_text):
+                self.assertEqual(
+                    restore_text(response_text, {}),
+                    '{"path":"[unresolved anonymization placeholder].php"}',
+                )
+
+    def test_unknown_placeholder_split_across_response_chunks_is_marked(self):
+        response = io.BytesIO(
+            ("x" * 4090 + "<US_DRIVER_LICENSE_136>.php").encode("utf-8")
+        )
+
+        self.assertIn(
+            "[unresolved anonymization placeholder].php",
+            "".join(restored_chunks(response, {})),
+        )
+
+    def test_unknown_streaming_tool_call_is_withheld_and_stream_completes(self):
+        frames = [
+            'data: {"id":"cmpl-x","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"write_file","arguments":"{\\"path\\":\\"<US_DRIVER_LICENSE_136>.php\\"}"}}]},"finish_reason":null}]}\n\n',
+            'data: {"id":"cmpl-x","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+            "data: [DONE]\n\n",
+        ]
+
+        output = "".join(guarded_stream_chunks(io.BytesIO("".join(frames).encode()), {}))
+
+        self.assertIn("Tool call withheld", output)
+        self.assertIn('"finish_reason":"stop"', output)
+        self.assertIn("data: [DONE]", output)
+        self.assertNotIn("write_file", output)
+        self.assertNotIn("US_DRIVER_LICENSE_136", output)
+
+    def test_unknown_tool_call_retries_and_continues_with_valid_call(self):
+        bad_frames = [
+            'data: {"id":"cmpl-x","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"write_file","arguments":"{\\"path\\":\\"<US_DRIVER_LICENSE_136>.php\\"}"}}]},"finish_reason":null}]}\n\n',
+            'data: {"id":"cmpl-x","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+            "data: [DONE]\n\n",
+        ]
+        repaired_frames = [
+            'data: {"id":"cmpl-y","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"list_dir","arguments":"{\\"path\\":\\"/workspace\\"}"}}]},"finish_reason":null}]}\n\n',
+            'data: {"id":"cmpl-y","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+            "data: [DONE]\n\n",
+        ]
+        retry_requests = []
+
+        def retry_upstream(request_body):
+            retry_requests.append(request_body)
+            return io.BytesIO("".join(repaired_frames).encode())
+
+        output = "".join(
+            guarded_stream_chunks(
+                io.BytesIO("".join(bad_frames).encode()),
+                {},
+                request_body={"messages": [{"role": "user", "content": "finish task"}]},
+                retry_upstream=retry_upstream,
+                max_retries=2,
+            )
+        )
+
+        self.assertEqual(len(retry_requests), 1)
+        self.assertIn("withheld your previous tool call", retry_requests[0]["messages"][-1]["content"])
+        self.assertIn("list_dir", output)
+        self.assertIn("data: [DONE]", output)
+        self.assertNotIn("US_DRIVER_LICENSE_136", output)
+
+    def test_unknown_tool_call_stops_after_retry_limit(self):
+        bad_frames = [
+            'data: {"id":"cmpl-x","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"write_file","arguments":"{\\"path\\":\\"<US_DRIVER_LICENSE_136>.php\\"}"}}]},"finish_reason":null}]}\n\n',
+            'data: {"id":"cmpl-x","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+            "data: [DONE]\n\n",
+        ]
+        retry_count = 0
+
+        def retry_upstream(request_body):
+            nonlocal retry_count
+            retry_count += 1
+            return io.BytesIO("".join(bad_frames).encode())
+
+        output = "".join(
+            guarded_stream_chunks(
+                io.BytesIO("".join(bad_frames).encode()),
+                {},
+                request_body={"messages": [{"role": "user", "content": "finish task"}]},
+                retry_upstream=retry_upstream,
+                max_retries=1,
+            )
+        )
+
+        self.assertEqual(retry_count, 1)
+        self.assertIn("after automatic retries", output)
+        self.assertIn('"finish_reason":"stop"', output)
+        self.assertIn("data: [DONE]", output)
+        self.assertNotIn("US_DRIVER_LICENSE_136", output)
+
+    def test_known_streaming_tool_call_is_restored_and_preserved(self):
+        frames = [
+            'data: {"id":"cmpl-x","model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"write_file","arguments":"{\\"path\\":\\"<PERSON_1>.php\\"}"}}]},"finish_reason":null}]}\n\n',
+            'data: {"id":"cmpl-x","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+            "data: [DONE]\n\n",
+        ]
+
+        output = "".join(
+            guarded_stream_chunks(
+                io.BytesIO("".join(frames).encode()),
+                {"<PERSON_1>": "Alice"},
+            )
+        )
+
+        self.assertIn("write_file", output)
+        self.assertIn("Alice.php", output)
+        self.assertNotIn("<PERSON_1>", output)
+
+    def test_unknown_nonstreaming_tool_call_is_withheld(self):
+        body = {
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "write_file",
+                                    "arguments": '{"path":"<US_DRIVER_LICENSE_136>.php"}',
+                                }
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+
+        restored = json.loads(
+            restore_nonstream_response(json.dumps(body).encode(), {})
+        )
+        choice = restored["choices"][0]
+
+        self.assertEqual(choice["finish_reason"], "stop")
+        self.assertNotIn("tool_calls", choice["message"])
+        self.assertIn("Tool call withheld", choice["message"]["content"])
 
     def test_analyzer_timeout_is_configured_and_logs_no_input_text(self):
         store = self.new_store()
@@ -189,7 +346,10 @@ class MappingStoreTests(unittest.TestCase):
         self.assertEqual(open_url.call_count, 1)
         self.assertEqual(
             [message["content"] for message in anonymized["messages"]],
-            ["<PERSON_1> sent the first note.", "<PERSON_1> sent another note."],
+            [
+                f"<PERSON_S{current_key[:12]}_1> sent the first note.",
+                f"<PERSON_S{current_key[:12]}_1> sent another note.",
+            ],
         )
 
     def test_mapping_does_not_expire_when_ttl_is_disabled(self):

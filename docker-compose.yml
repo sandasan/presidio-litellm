@@ -27,6 +27,7 @@ services:
     environment:
       - OPENCODE_MAPPING_TTL_SECONDS=${OPENCODE_MAPPING_TTL_SECONDS:-0}
       - PRESIDIO_ANALYZE_TIMEOUT_SECONDS=${PRESIDIO_ANALYZE_TIMEOUT_SECONDS:-60}
+      - OPENCODE_UNRESOLVED_TOOL_RETRIES=${OPENCODE_UNRESOLVED_TOOL_RETRIES:-2}
     network_mode: "host" # Позволяет скрипту прозрачно слушать 127.0.0.1:4001 хоста и видеть presidio на 5001
     restart: unless-stopped
     depends_on:

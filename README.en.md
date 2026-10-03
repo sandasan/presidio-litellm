@@ -19,6 +19,8 @@ across restarts. The volume contains original PII and should not be shared.
 Mappings are retained indefinitely by default. Set a positive retention period
 in seconds with `OPENCODE_MAPPING_TTL_SECONDS` in `.env` to enable cleanup; `0`
 disables expiration.
+The Presidio analysis timeout defaults to 60 seconds and can be changed with
+`PRESIDIO_ANALYZE_TIMEOUT_SECONDS` in `.env`.
 If a legacy placeholder has no mapping, the request continues with the opaque
 token; its original value cannot be recovered without a database entry.
 

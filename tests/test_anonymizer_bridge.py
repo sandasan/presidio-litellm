@@ -1,11 +1,19 @@
+import io
+import json
 import sqlite3
 import tempfile
 import unittest
+import urllib.error
+from contextlib import redirect_stderr
+from unittest.mock import patch
 
 from anonymizer_bridge import (
+    PRESIDIO_ANALYZE_TIMEOUT_SECONDS,
     MappingStore,
     add_cached_replacements,
+    anonymize_text,
     anonymize_from_results,
+    anonymize_value,
     session_key,
 )
 
@@ -127,6 +135,62 @@ class MappingStoreTests(unittest.TestCase):
         self.assertEqual(normalized, "<PERSON_1>")
         self.assertEqual(repeated, normalized)
         self.assertEqual(replacements, {})
+
+    def test_analyzer_timeout_is_configured_and_logs_no_input_text(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+        private_text = "private text must not appear in timeout logs"
+        log = io.StringIO()
+
+        with patch(
+            "anonymizer_bridge.urllib.request.urlopen",
+            side_effect=urllib.error.URLError(TimeoutError("timed out")),
+        ) as open_url:
+            with redirect_stderr(log), self.assertRaises(urllib.error.URLError):
+                anonymize_text(private_text, {}, store, current_key)
+
+        self.assertEqual(
+            open_url.call_args.kwargs["timeout"], PRESIDIO_ANALYZE_TIMEOUT_SECONDS
+        )
+        self.assertIn("text_chars=", log.getvalue())
+        self.assertNotIn(private_text, log.getvalue())
+
+    def test_message_texts_are_analyzed_in_one_batch(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+        body = {
+            "messages": [
+                {"role": "user", "content": "Alice sent the first note."},
+                {"role": "assistant", "content": "Alice sent another note."},
+            ]
+        }
+
+        def analyze_request(request, timeout):
+            request_body = json.loads(request.data.decode("utf-8"))
+            text = request_body["text"]
+            results = []
+            search_from = 0
+            while True:
+                start = text.find("Alice", search_from)
+                if start < 0:
+                    break
+                results.append(
+                    {"start": start, "end": start + 5, "entity_type": "PERSON"}
+                )
+                search_from = start + 5
+            return io.BytesIO(json.dumps(results).encode("utf-8"))
+
+        with patch(
+            "anonymizer_bridge.urllib.request.urlopen",
+            side_effect=analyze_request,
+        ) as open_url:
+            anonymized = anonymize_value(body, {}, store, current_key)
+
+        self.assertEqual(open_url.call_count, 1)
+        self.assertEqual(
+            [message["content"] for message in anonymized["messages"]],
+            ["<PERSON_1> sent the first note.", "<PERSON_1> sent another note."],
+        )
 
     def test_mapping_does_not_expire_when_ttl_is_disabled(self):
         store = MappingStore(self.database, ttl_seconds=0)

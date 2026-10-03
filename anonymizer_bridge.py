@@ -13,8 +13,15 @@ import urllib.error
 import urllib.request
 import ssl
 import http.client
+from bisect import bisect_right
 
 PRESIDIO_URL = "http://127.0.0.1:5001"
+PRESIDIO_ANALYZE_TIMEOUT_SECONDS = float(
+    os.environ.get("PRESIDIO_ANALYZE_TIMEOUT_SECONDS", "60")
+)
+PRESIDIO_ANALYZE_BATCH_MAX_CHARS = 20000
+if PRESIDIO_ANALYZE_TIMEOUT_SECONDS <= 0:
+    raise ValueError("Presidio analyze timeout must be positive")
 OPENCODE_REAL_IP = "104.21.32.140"
 PLACEHOLDER_PATTERN = re.compile(
     r"<[A-Z][A-Z0-9_]*_(?:\d+(?:_[0-9a-f]{32})?|[0-9a-f]{32})>"
@@ -277,53 +284,175 @@ def anonymize_from_results(text, analyzer_results, replacements, mapping_store, 
     return "".join(parts)
 
 
-def anonymize_text(text, replacements, mapping_store, session_id):
-    text = add_cached_replacements(text, replacements, mapping_store, session_id)
+def detected_language(text):
     detected_lang = "en"
     if re.search(r"[ҐґЄєІіЇї]", text):
         detected_lang = "uk"
     elif re.search(r"[а-яА-ЯёЁ]", text):
         detected_lang = "ru"
+    return detected_lang
 
-    payload = json.dumps({"text": text, "language": detected_lang}).encode("utf-8")
+
+def analyze_text(text, language):
+    payload = json.dumps({"text": text, "language": language}).encode("utf-8")
     req_presidio = urllib.request.Request(
         PRESIDIO_URL + "/analyze",
         data=payload,
         headers={"Content-Type": "application/json", "Host": "127.0.0.1:5001"},
     )
-    with urllib.request.urlopen(req_presidio, timeout=10) as response:
-        analyzer_results = json.loads(response.read().decode("utf-8"))
+    started_at = time.monotonic()
+    try:
+        with urllib.request.urlopen(
+            req_presidio, timeout=PRESIDIO_ANALYZE_TIMEOUT_SECONDS
+        ) as response:
+            analyzer_results = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError) as error:
+        reason = getattr(error, "reason", error)
+        if isinstance(reason, TimeoutError):
+            elapsed = time.monotonic() - started_at
+            print(
+                "[Presidio Analyzer Timeout] "
+                f"limit_seconds={PRESIDIO_ANALYZE_TIMEOUT_SECONDS:g} "
+                f"elapsed_seconds={elapsed:.1f} text_chars={len(text)}",
+                file=sys.stderr,
+                flush=True,
+            )
+        raise
     if not isinstance(analyzer_results, list):
         raise ValueError("Invalid Presidio analyzer response")
-    if not analyzer_results:
-        return text
-    return anonymize_from_results(
-        text, analyzer_results, replacements, mapping_store, session_id
-    )
+    return analyzer_results
+
+
+def anonymize_text_batch(texts, replacements, mapping_store, session_id):
+    normalized = [
+        add_cached_replacements(text, replacements, mapping_store, session_id)
+        for text in texts
+    ]
+    grouped_indices = {}
+    for index, text in enumerate(normalized):
+        if text:
+            grouped_indices.setdefault(detected_language(text), []).append(index)
+
+    results_by_index = [[] for _ in texts]
+    for language, indices in grouped_indices.items():
+        batches = []
+        batch = []
+        batch_chars = 0
+        for index in indices:
+            additional_chars = len(normalized[index]) + (2 if batch else 0)
+            if batch and batch_chars + additional_chars > PRESIDIO_ANALYZE_BATCH_MAX_CHARS:
+                batches.append(batch)
+                batch = []
+                batch_chars = 0
+                additional_chars = len(normalized[index])
+            batch.append(index)
+            batch_chars += additional_chars
+        if batch:
+            batches.append(batch)
+
+        for batch in batches:
+            segments = []
+            segment_starts = []
+            parts = []
+            offset = 0
+            for index in batch:
+                text = normalized[index]
+                segment_starts.append(offset)
+                segments.append((index, offset, offset + len(text)))
+                parts.append(text)
+                offset += len(text)
+                if index != batch[-1]:
+                    parts.append("\n\n")
+                    offset += 2
+
+            combined_text = "".join(parts)
+            analyzer_results = analyze_text(combined_text, language)
+            for result in analyzer_results:
+                if not isinstance(result, dict):
+                    raise ValueError("Invalid Presidio analyzer result")
+                start, end = result.get("start"), result.get("end")
+                entity_type = result.get("entity_type")
+                if (
+                    not isinstance(start, int)
+                    or isinstance(start, bool)
+                    or not isinstance(end, int)
+                    or isinstance(end, bool)
+                    or not isinstance(entity_type, str)
+                    or start < 0
+                    or start >= end
+                    or end > len(combined_text)
+                ):
+                    raise ValueError("Invalid Presidio analyzer span")
+                segment_position = bisect_right(segment_starts, start) - 1
+                index, segment_start, segment_end = segments[segment_position]
+                if start < segment_start or end > segment_end:
+                    continue
+                results_by_index[index].append(
+                    {
+                        "start": start - segment_start,
+                        "end": end - segment_start,
+                        "entity_type": entity_type,
+                    }
+                )
+
+    return [
+        anonymize_from_results(text, results, replacements, mapping_store, session_id)
+        if results
+        else text
+        for text, results in zip(normalized, results_by_index)
+    ]
+
+
+def anonymize_text(text, replacements, mapping_store, session_id):
+    return anonymize_text_batch([text], replacements, mapping_store, session_id)[0]
+
+
+class TextReference:
+    __slots__ = ("index",)
+
+    def __init__(self, index):
+        self.index = index
 
 
 def anonymize_value(value, replacements, mapping_store, session_id):
-    if isinstance(value, str):
-        return anonymize_text(value, replacements, mapping_store, session_id)
-    if isinstance(value, list):
-        return [
-            anonymize_value(item, replacements, mapping_store, session_id)
-            for item in value
-        ]
-    if isinstance(value, dict):
-        media_keys = {"image", "image_url", "input_image", "audio", "input_audio", "video", "file_data"}
-        content_type = value.get("type")
-        content_types = content_type if isinstance(content_type, list) else [content_type]
-        if any(isinstance(item, str) and item in MEDIA_TYPES for item in content_types):
-            raise ValueError("Multimodal payload is not supported by the anonymizer")
-        if any(key.lower() in media_keys and item for key, item in value.items()):
-            raise ValueError("Multimodal payload is not supported by the anonymizer")
-        return {
-            anonymize_text(key, replacements, mapping_store, session_id):
-            anonymize_value(item, replacements, mapping_store, session_id)
-            for key, item in value.items()
-        }
-    return value
+    texts = []
+
+    def collect(node):
+        if isinstance(node, str):
+            index = len(texts)
+            texts.append(node)
+            return TextReference(index)
+        if isinstance(node, list):
+            return [collect(item) for item in node]
+        if isinstance(node, dict):
+            media_keys = {"image", "image_url", "input_image", "audio", "input_audio", "video", "file_data"}
+            content_type = node.get("type")
+            content_types = content_type if isinstance(content_type, list) else [content_type]
+            if any(isinstance(item, str) and item in MEDIA_TYPES for item in content_types):
+                raise ValueError("Multimodal payload is not supported by the anonymizer")
+            if any(key.lower() in media_keys and item for key, item in node.items()):
+                raise ValueError("Multimodal payload is not supported by the anonymizer")
+            return {
+                collect(key): collect(item)
+                for key, item in node.items()
+            }
+        return node
+
+    collected = collect(value)
+    anonymized_texts = anonymize_text_batch(
+        texts, replacements, mapping_store, session_id
+    )
+
+    def rebuild(node):
+        if isinstance(node, TextReference):
+            return anonymized_texts[node.index]
+        if isinstance(node, list):
+            return [rebuild(item) for item in node]
+        if isinstance(node, dict):
+            return {rebuild(key): rebuild(item) for key, item in node.items()}
+        return node
+
+    return rebuild(collected)
 
 
 def add_cached_replacements(text, replacements, mapping_store, session_id):

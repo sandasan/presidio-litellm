@@ -24,8 +24,13 @@ PRESIDIO_ANALYZE_BATCH_MAX_CHARS = 20000
 if PRESIDIO_ANALYZE_TIMEOUT_SECONDS <= 0:
     raise ValueError("Presidio analyze timeout must be positive")
 OPENCODE_REAL_IP = "104.21.32.140"
+PLACEHOLDER_BODY = (
+    r"[A-Z][A-Z0-9_]*_(?:S[0-9a-f]{12}_\d+|\d+(?:_[0-9a-f]{32})?|[0-9a-f]{32})"
+)
 PLACEHOLDER_PATTERN = re.compile(
-    r"<[A-Z][A-Z0-9_]*_(?:S[0-9a-f]{12}_\d+|\d+(?:_[0-9a-f]{32})?|[0-9a-f]{32})>"
+    r"(?:<|\\u003c|\\u003C|&lt;)"
+    rf"{PLACEHOLDER_BODY}"
+    r"(?:>|\\u003e|\\u003E|&gt;)"
 )
 SESSION_PLACEHOLDER_PATTERN = re.compile(
     r"<(?P<entity>[A-Z][A-Z0-9_]*?)_S(?P<session>[0-9a-f]{12})_(?P<index>\d+)>"
@@ -241,6 +246,46 @@ class MappingStore:
             raise
         finally:
             connection.close()
+
+    def list_mappings(self, session_id):
+        """Все известные плейсхолдеры сессии и родителей — для restore ответа."""
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """WITH RECURSIVE lineage(session_id, depth, path) AS (
+                       SELECT ?, 0, ',' || ? || ','
+                       UNION ALL
+                       SELECT sessions.parent_session_id, lineage.depth + 1,
+                              lineage.path || sessions.parent_session_id || ','
+                       FROM sessions JOIN lineage
+                         ON sessions.session_id = lineage.session_id
+                       WHERE sessions.parent_session_id IS NOT NULL
+                         AND lineage.depth < 32
+                         AND instr(lineage.path,
+                                   ',' || sessions.parent_session_id || ',') = 0
+                   )
+                   SELECT mappings.placeholder, mappings.original_value, lineage.depth
+                   FROM lineage JOIN mappings USING (session_id)
+                   ORDER BY lineage.depth""",
+                (session_id, session_id),
+            ).fetchall()
+            replacements = {}
+            for placeholder, original_value, _depth in rows:
+                replacements.setdefault(placeholder, original_value)
+            return replacements
+        finally:
+            connection.close()
+
+
+def canonical_placeholder(token):
+    return (
+        token.replace("\\u003c", "<")
+        .replace("\\u003C", "<")
+        .replace("\\u003e", ">")
+        .replace("\\u003E", ">")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+    )
 
 
 def session_key(raw_session_id):
@@ -481,7 +526,10 @@ def anonymize_value(value, replacements, mapping_store, session_id):
 
 
 def add_cached_replacements(text, replacements, mapping_store, session_id):
-    for placeholder in dict.fromkeys(PLACEHOLDER_PATTERN.findall(text)):
+    for placeholder in dict.fromkeys(
+        canonical_placeholder(match.group(0))
+        for match in PLACEHOLDER_PATTERN.finditer(text)
+    ):
         original_value = mapping_store.resolve(session_id, placeholder)
         legacy_match = LEGACY_UUID_PLACEHOLDER_PATTERN.fullmatch(placeholder)
         if legacy_match is not None:
@@ -533,10 +581,10 @@ def validate_chat_request(body, path):
 
 def restore_text(text, replacements):
     def replace_placeholder(match):
-        original_value = replacements.get(match.group(0))
+        original_value = replacements.get(canonical_placeholder(match.group(0)))
         if original_value is None:
             return UNRESOLVED_PLACEHOLDER
-        return json.dumps(original_value, ensure_ascii=False)[1:-1]
+        return original_value
 
     return PLACEHOLDER_PATTERN.sub(replace_placeholder, text)
 
@@ -552,13 +600,22 @@ def restored_chunks(response, replacements):
             break
         combined = pending + decoder.decode(chunk)
         split_at = max(0, len(combined) - tail_length)
+        encoded_tokens = []
         for placeholder in replacements:
+            encoded_tokens.append(placeholder)
+            encoded_tokens.append(
+                placeholder.replace("<", "\\u003c").replace(">", "\\u003e")
+            )
+            encoded_tokens.append(
+                placeholder.replace("<", "&lt;").replace(">", "&gt;")
+            )
+        for encoded in encoded_tokens:
             search_from = 0
             while True:
-                start = combined.find(placeholder, search_from)
+                start = combined.find(encoded, search_from)
                 if start < 0:
                     break
-                end = start + len(placeholder)
+                end = start + len(encoded)
                 if start < split_at < end:
                     split_at = start
                 search_from = start + 1
@@ -774,7 +831,8 @@ def guarded_stream_chunks(
 def contains_unresolved_placeholder(value, replacements):
     if isinstance(value, str):
         return UNRESOLVED_PLACEHOLDER in value or any(
-            placeholder not in replacements for placeholder in PLACEHOLDER_PATTERN.findall(value)
+            canonical_placeholder(placeholder) not in replacements
+            for placeholder in PLACEHOLDER_PATTERN.findall(value)
         )
     if isinstance(value, list):
         return any(contains_unresolved_placeholder(item, replacements) for item in value)
@@ -790,7 +848,9 @@ def contains_unresolved_placeholder(value, replacements):
 def restore_json_value(value, replacements):
     if isinstance(value, str):
         return PLACEHOLDER_PATTERN.sub(
-            lambda match: replacements.get(match.group(0), UNRESOLVED_PLACEHOLDER),
+            lambda match: replacements.get(
+                canonical_placeholder(match.group(0)), UNRESOLVED_PLACEHOLDER
+            ),
             value,
         )
     if isinstance(value, list):
@@ -946,6 +1006,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             self.server.mapping_store.prepare_session(session_id, parent_session_id)
+            replacements = self.server.mapping_store.list_mappings(session_id)
             anonymized_body = anonymize_value(
                 body, replacements, self.server.mapping_store, session_id
             )

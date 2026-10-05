@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import hashlib
+import re
 from typing import Optional
 
 import httpx
@@ -50,14 +51,14 @@ def get_presidio_client() -> httpx.AsyncClient:
 
 
 # ---- LRU кэш для ответов Presidio ----
-# Ключ: sha256(text)[:16], значение: анонимизированный текст
+# Ключ: sha256(text)[:16], значение: (анонимизированный текст, пары плейсхолдер→оригинал)
 # Размер кэша: 1024 записи (память ~ несколько MB)
 _ANONYMIZE_CACHE_SIZE = 1024
-_anonymize_cache: dict[str, str] = {}
+_anonymize_cache: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {}
 _anonymize_cache_order: list[str] = []
 
 
-def _cache_get(key: str) -> Optional[str]:
+def _cache_get(key: str) -> Optional[tuple[str, tuple[tuple[str, str], ...]]]:
     """LRU get: перемещает ключ в конец (most recently used)."""
     if key in _anonymize_cache:
         _anonymize_cache_order.remove(key)
@@ -66,7 +67,7 @@ def _cache_get(key: str) -> Optional[str]:
     return None
 
 
-def _cache_put(key: str, value: str) -> None:
+def _cache_put(key: str, value: tuple[str, tuple[tuple[str, str], ...]]) -> None:
     """LRU put: удаляет старые записи при переполнении."""
     if key in _anonymize_cache:
         _anonymize_cache_order.remove(key)
@@ -192,118 +193,184 @@ class MaxTokensClamp(CustomLogger):
         return data
 
 
+PII_PLACEHOLDER_PATTERN = re.compile(r"<[A-Z][A-Z0-9_]*_[0-9a-f]{10}>")
+OPENCODE_PLACEHOLDER_PATTERN = re.compile(
+    r"<[A-Z][A-Z0-9_]*_(?:S[0-9a-f]{12}_\d+|\d+(?:_[0-9a-f]{32})?|[0-9a-f]{32})>"
+)
+_MAX_PLACEHOLDER_LEN = 96
+
+
+def _detected_language(text: str) -> str:
+    if re.search(r"[ҐґЄєІіЇї]", text):
+        return "uk"
+    if re.search(r"[а-яА-ЯёЁ]", text):
+        return "ru"
+    return "en"
+
+
+def _placeholder_for(entity_type: str, original: str) -> str:
+    digest = hashlib.sha256(f"{entity_type}:{original}".encode("utf-8")).hexdigest()[:10]
+    return f"<{entity_type}_{digest}>"
+
+
+def _merge_analyzer_spans(text: str, analyzer_results: list) -> list[dict]:
+    spans = []
+    for result in analyzer_results:
+        if not isinstance(result, dict):
+            continue
+        start, end = result.get("start"), result.get("end")
+        entity_type = result.get("entity_type")
+        if (
+            not isinstance(start, int)
+            or isinstance(start, bool)
+            or not isinstance(end, int)
+            or isinstance(end, bool)
+            or not isinstance(entity_type, str)
+            or start < 0
+            or start >= end
+            or end > len(text)
+        ):
+            continue
+        spans.append({"start": start, "end": end, "entity_type": entity_type})
+    spans.sort(key=lambda item: (item["start"], item["end"]))
+    merged = []
+    for span in spans:
+        if merged and span["start"] < merged[-1]["end"]:
+            merged[-1]["end"] = max(merged[-1]["end"], span["end"])
+        else:
+            merged.append(span)
+    return merged
+
+
+def _anonymize_from_spans(text: str, spans: list[dict], restore_map: dict[str, str]) -> str:
+    parts = []
+    cursor = 0
+    for span in spans:
+        original = text[span["start"]:span["end"]]
+        placeholder = _placeholder_for(span["entity_type"], original)
+        restore_map[placeholder] = original
+        parts.extend((text[cursor:span["start"]], placeholder))
+        cursor = span["end"]
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def _restore_text(text: str, restore_map: dict[str, str]) -> str:
+    if not text or not restore_map:
+        return text
+
+    def replace_token(match):
+        return restore_map.get(match.group(0), match.group(0))
+
+    text = PII_PLACEHOLDER_PATTERN.sub(replace_token, text)
+    text = OPENCODE_PLACEHOLDER_PATTERN.sub(replace_token, text)
+    return text
+
+
+def _restore_stream_piece(pending: str, piece: str, restore_map: dict[str, str]) -> tuple[str, str]:
+    combined = pending + piece
+    split_at = max(0, len(combined) - _MAX_PLACEHOLDER_LEN)
+    for match in PII_PLACEHOLDER_PATTERN.finditer(combined):
+        if match.start() < split_at < match.end():
+            split_at = match.start()
+    for match in OPENCODE_PLACEHOLDER_PATTERN.finditer(combined):
+        if match.start() < split_at < match.end():
+            split_at = match.start()
+    return _restore_text(combined[:split_at], restore_map), combined[split_at:]
+
+
+def _call_id_from(data) -> str:
+    if isinstance(data, dict):
+        for key in ("litellm_call_id", "litellm_trace_id"):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return str(id(data))
+
+
 class LiteralSecretMasker(CustomLogger):
     """
     LiteLLM callback: маскирует PII в запросе (pre_call),
     восстанавливает в ответе (post_call + streaming).
-    Использует singleton HTTP клиент + LRU кэш для ускорения.
+    Плейсхолдеры вставляем сами по спанам analyzer — они совпадают с map.
     """
 
     def __init__(self):
         super().__init__()
         self.enabled = True
-        self._placeholder_map: dict[str, str] = {}  # placeholder -> original
+        self._maps_by_call: dict[str, dict[str, str]] = {}
 
-    async def _mask_text(self, text: str) -> str:
-        """Отправляет текст в Presidio, маскирует, сохраняет маппинг."""
+    async def _mask_text(self, text: str, restore_map: dict[str, str]) -> str:
+        """Анализирует текст и заменяет спаны стабильными плейсхолдерами."""
         if not text:
             return text
 
-        # --- Проверка кэша ---
         cache_key = _make_cache_key(text)
         cached = _cache_get(cache_key)
         if cached is not None:
-            return cached
+            anonymized, pairs = cached
+            restore_map.update(pairs)
+            return anonymized
 
         client = get_presidio_client()
-
-        # 1. Анализ
         analyze_resp = await client.post(
             PRESIDIO_ANALYZER_URL,
-            json={"text": text, "language": "en"},
+            json={"text": text, "language": _detected_language(text)},
         )
         analyze_resp.raise_for_status()
         analyzer_results = analyze_resp.json()
         if not isinstance(analyzer_results, list):
             raise ValueError("Invalid Presidio analyzer response")
         if not analyzer_results:
-            _cache_put(cache_key, text)
+            _cache_put(cache_key, (text, ()))
             return text
 
-        # 2. Анонимизация
-        anon_resp = await client.post(
-            PRESIDIO_ANONYMIZER_URL,
-            json={"text": text, "analyzer_results": analyzer_results},
-        )
-        anon_resp.raise_for_status()
-        anon_data = anon_resp.json()
-        if not isinstance(anon_data, dict) or not isinstance(anon_data.get("text"), str):
-            raise ValueError("Invalid Presidio anonymizer response")
-        anonymized = anon_data["text"]
-
-        # 3. Сохраняем маппинг placeholder -> original для де-анонимизации
-        for result in analyzer_results:
-            entity_type = result["entity_type"]
-            start = result["start"]
-            end = result["end"]
-            original = text[start:end]
-            placeholder = f"<{entity_type}_{len(self._placeholder_map) + 1}>"
-            self._placeholder_map[placeholder] = original
-
-        _cache_put(cache_key, anonymized)
+        spans = _merge_analyzer_spans(text, analyzer_results)
+        local_map: dict[str, str] = {}
+        anonymized = _anonymize_from_spans(text, spans, local_map)
+        restore_map.update(local_map)
+        _cache_put(cache_key, (anonymized, tuple(local_map.items())))
         return anonymized
 
-    def _restore_text(self, text: str) -> str:
-        """Восстанавливает оригинальные значения из маппинга."""
-        if not text:
-            return text
-        for placeholder, original in self._placeholder_map.items():
-            text = text.replace(placeholder, original)
-        return text
-
-    async def _walk(self, obj):
+    async def _walk(self, obj, restore_map: dict[str, str]):
         """Рекурсивно маскирует строки в словаре/списке."""
         if isinstance(obj, str):
-            return await self._mask_text(obj)
+            return await self._mask_text(obj, restore_map)
         if isinstance(obj, list):
-            return [await self._walk(x) for x in obj]
+            return [await self._walk(x, restore_map) for x in obj]
         if isinstance(obj, dict):
-            return {k: await self._walk(v) for k, v in obj.items()}
+            return {k: await self._walk(v, restore_map) for k, v in obj.items()}
         return obj
 
-    def _restore_walk(self, obj):
-        if isinstance(obj, str):
-            return self._restore_text(obj)
-        if isinstance(obj, list):
-            return [self._restore_walk(x) for x in obj]
-        if isinstance(obj, dict):
-            return {k: self._restore_walk(v) for k, v in obj.items()}
-        return obj
+    def _restore_message_fields(self, msg, restore_map: dict[str, str]) -> None:
+        if isinstance(getattr(msg, "content", None), str):
+            msg.content = _restore_text(msg.content, restore_map)
+        if getattr(msg, "tool_calls", None):
+            for tc in msg.tool_calls:
+                fn = getattr(tc, "function", None)
+                if fn is not None and isinstance(getattr(fn, "arguments", None), str):
+                    fn.arguments = _restore_text(fn.arguments, restore_map)
 
     # --- LiteLLM hooks ----------------------------------------------------
 
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         if not self.enabled or not isinstance(data, dict):
             return data
-        self._placeholder_map.clear()
-        data = await self._walk(data)
-        return data
+        restore_map = {}
+        self._maps_by_call[_call_id_from(data)] = restore_map
+        return await self._walk(data, restore_map)
 
     async def async_post_call_success_hook(self, data, user_api_key_dict, response):
         if not self.enabled:
             return response
+        restore_map = self._maps_by_call.get(_call_id_from(data), {})
         if hasattr(response, "choices"):
             for choice in response.choices:
                 msg = getattr(choice, "message", None)
                 if msg is None:
                     continue
-                if isinstance(msg.content, str):
-                    msg.content = self._restore_text(msg.content)
-                if getattr(msg, "tool_calls", None):
-                    for tc in msg.tool_calls:
-                        fn = getattr(tc, "function", None)
-                        if fn is not None and isinstance(getattr(fn, "arguments", None), str):
-                            fn.arguments = self._restore_text(fn.arguments)
+                self._restore_message_fields(msg, restore_map)
+        self._maps_by_call.pop(_call_id_from(data), None)
         return response
 
     async def async_post_call_streaming_iterator_hook(self, user_api_key_dict, response, request_data):
@@ -311,29 +378,71 @@ class LiteralSecretMasker(CustomLogger):
             async for chunk in response:
                 yield chunk
             return
-        async for chunk in response:
-            try:
-                if chunk.choices:
-                    for choice in chunk.choices:
-                        delta = getattr(choice, "delta", None)
-                        if delta is not None:
-                            if isinstance(getattr(delta, "content", None), str):
-                                delta.content = self._restore_text(delta.content)
-                            if getattr(delta, "tool_calls", None):
-                                for tc in delta.tool_calls:
-                                    fn = getattr(tc, "function", None)
-                                    if fn is not None and isinstance(
-                                        getattr(fn, "arguments", None), str
-                                    ):
-                                        fn.arguments = self._restore_text(fn.arguments)
-                message = getattr(chunk, "message", None)
-                if message is not None:
-                    content = getattr(message, "content", None)
-                    if isinstance(content, str):
-                        message.content = self._restore_text(content)
-            except Exception:  # noqa: BLE001 — никогда не ломаем стрим из-за маскера
-                pass
-            yield chunk
+        restore_map = self._maps_by_call.get(_call_id_from(request_data), {})
+        pending_content = ""
+        pending_args: dict[int, str] = {}
+        last_chunk = None
+        try:
+            async for chunk in response:
+                if last_chunk is not None:
+                    yield last_chunk
+                try:
+                    if chunk.choices:
+                        for choice in chunk.choices:
+                            delta = getattr(choice, "delta", None)
+                            if delta is not None:
+                                if isinstance(getattr(delta, "content", None), str):
+                                    restored, pending_content = _restore_stream_piece(
+                                        pending_content, delta.content, restore_map
+                                    )
+                                    delta.content = restored
+                                if getattr(delta, "tool_calls", None):
+                                    for tc in delta.tool_calls:
+                                        fn = getattr(tc, "function", None)
+                                        if fn is None or not isinstance(
+                                            getattr(fn, "arguments", None), str
+                                        ):
+                                            continue
+                                        index = getattr(tc, "index", 0)
+                                        restored, pending_args[index] = _restore_stream_piece(
+                                            pending_args.get(index, ""),
+                                            fn.arguments,
+                                            restore_map,
+                                        )
+                                        fn.arguments = restored
+                    message = getattr(chunk, "message", None)
+                    if message is not None:
+                        self._restore_message_fields(message, restore_map)
+                except Exception:  # noqa: BLE001 — никогда не ломаем стрим из-за маскера
+                    pass
+                last_chunk = chunk
+            if last_chunk is not None:
+                try:
+                    if pending_content and last_chunk.choices:
+                        delta = getattr(last_chunk.choices[0], "delta", None)
+                        if delta is not None and isinstance(getattr(delta, "content", None), str):
+                            delta.content += _restore_text(pending_content, restore_map)
+                            pending_content = ""
+                        elif delta is not None:
+                            delta.content = _restore_text(pending_content, restore_map)
+                            pending_content = ""
+                    if pending_args and last_chunk.choices:
+                        delta = getattr(last_chunk.choices[0], "delta", None)
+                        tool_calls = getattr(delta, "tool_calls", None) if delta else None
+                        if tool_calls:
+                            for tc in tool_calls:
+                                fn = getattr(tc, "function", None)
+                                index = getattr(tc, "index", 0)
+                                leftover = pending_args.pop(index, "")
+                                if leftover and fn is not None and isinstance(
+                                    getattr(fn, "arguments", None), str
+                                ):
+                                    fn.arguments += _restore_text(leftover, restore_map)
+                except Exception:  # noqa: BLE001
+                    pass
+                yield last_chunk
+        finally:
+            self._maps_by_call.pop(_call_id_from(request_data), None)
 
 
 proxy_handler_instance = MaxTokensClamp()

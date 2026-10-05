@@ -406,5 +406,47 @@ class MappingStoreTests(unittest.TestCase):
         self.assertEqual(replacements[placeholder], "Alice")
 
 
+    def test_response_restores_placeholder_from_session_store(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+        placeholder = self.create_person_token(store, current_key)
+
+        replacements = store.list_mappings(current_key)
+        restored = restore_text(
+            f"see {placeholder} in Model_Booking_{placeholder}p:227",
+            replacements,
+        )
+
+        self.assertEqual(restored, "see Alice in Model_Booking_Alicep:227")
+        self.assertNotIn(placeholder, restored)
+
+    def test_unicode_escaped_placeholder_is_restored(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+        placeholder = self.create_person_token(store, current_key)
+        escaped = placeholder.replace("<", "\\u003c").replace(">", "\\u003e")
+        replacements = store.list_mappings(current_key)
+
+        self.assertEqual(restore_text(escaped, replacements), "Alice")
+        self.assertIn(
+            "Alice.php",
+            "".join(
+                restored_chunks(
+                    io.BytesIO(f'{{"path":"{escaped}.php"}}'.encode()),
+                    replacements,
+                )
+            ),
+        )
+
+    def test_html_escaped_placeholder_is_restored(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+        placeholder = self.create_person_token(store, current_key)
+        html_escaped = placeholder.replace("<", "&lt;").replace(">", "&gt;")
+        replacements = store.list_mappings(current_key)
+
+        self.assertEqual(restore_text(html_escaped, replacements), "Alice")
+
+
 if __name__ == "__main__":
     unittest.main()

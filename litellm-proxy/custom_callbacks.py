@@ -11,9 +11,9 @@ logger = logging.getLogger(__name__)
 PRESIDIO_ANALYZER_URL = os.getenv(
     "PRESIDIO_ANALYZER_API_BASE", "http://presidio:5001"
 ) + "/analyze"
-PRESIDIO_ANONYMIZER_URL = os.getenv(
-    "PRESIDIO_ANONYMIZER_API_BASE", "http://presidio:5001"
-) + "/anonymize"
+PRESIDIO_SANITIZER_URL = os.getenv(
+    "PRESIDIO_ANALYZER_API_BASE", "http://presidio:5001"
+).rstrip("/") + "/"
 LITELLM_INTERNAL_REQUEST_FIELDS = {
     "litellm_call_id",
     "litellm_logging_obj",
@@ -42,24 +42,13 @@ class ChatPayloadGuard(CustomLogger):
         if not text:
             return text
         response = await client.post(
-            PRESIDIO_ANALYZER_URL,
+            PRESIDIO_SANITIZER_URL,
             json={"text": text, "language": "en"},
-        )
-        response.raise_for_status()
-        results = response.json()
-        if not isinstance(results, list):
-            raise ValueError("Invalid Presidio analyzer response")
-        if not results:
-            return text
-
-        response = await client.post(
-            PRESIDIO_ANONYMIZER_URL,
-            json={"text": text, "analyzer_results": results},
         )
         response.raise_for_status()
         anonymized = response.json()
         if not isinstance(anonymized, dict) or not isinstance(anonymized.get("text"), str):
-            raise ValueError("Invalid Presidio anonymizer response")
+            raise ValueError("Invalid Presidio sanitizer response")
         return anonymized["text"]
 
     async def _anonymize_metadata(self, client, value):

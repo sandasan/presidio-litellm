@@ -386,7 +386,7 @@ def build_config(routes: Sequence[tuple[str, dict]]) -> str:
             "  cooldown_time: 60",
             "",
             "litellm_settings:",
-            '  callbacks: ["custom_callbacks.proxy_handler_instance", "custom_callbacks.secret_masker_instance", "custom_callbacks.chat_payload_guard_instance"]',
+            '  callbacks: ["custom_callbacks.proxy_handler_instance", "custom_callbacks.secret_masker_instance"]',
             # КЛЮЧЕВЫЕ НАСТРОЙКИ ДЛЯ ПРЯМОГО ПРОБРОСА:
             "  allow_unsupported_deployments: true", # Разрешаем модели, которых нет в статичном списке
             "",

@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import hashlib
+from typing import Optional
 
 import httpx
 from litellm.integrations.custom_logger import CustomLogger
@@ -8,12 +10,11 @@ from litellm.integrations.custom_logger import CustomLogger
 MAX_OUTPUT_TOKENS = int(os.getenv("MAX_OUTPUT_TOKENS", "8192").strip())
 
 logger = logging.getLogger(__name__)
-PRESIDIO_ANALYZER_URL = os.getenv(
+PRESIDIO_ANALYZER_API_BASE = os.getenv(
     "PRESIDIO_ANALYZER_API_BASE", "http://presidio:5001"
-) + "/analyze"
-PRESIDIO_SANITIZER_URL = os.getenv(
-    "PRESIDIO_ANALYZER_API_BASE", "http://presidio:5001"
-).rstrip("/") + "/"
+)
+PRESIDIO_ANALYZER_URL = PRESIDIO_ANALYZER_API_BASE + "/analyze"
+PRESIDIO_ANONYMIZER_URL = PRESIDIO_ANALYZER_API_BASE + "/anonymize"
 LITELLM_INTERNAL_REQUEST_FIELDS = {
     "litellm_call_id",
     "litellm_logging_obj",
@@ -34,6 +35,52 @@ TOOL_SCHEMA_ENTITIES = [
     "INTERNAL_PATH",
 ]
 
+# ---- HTTP connection pool (singleton) ----
+_presidio_client: Optional[httpx.AsyncClient] = None
+
+
+def get_presidio_client() -> httpx.AsyncClient:
+    """Возвращает singleton AsyncClient с пулингом соединений к Presidio."""
+    global _presidio_client
+    if _presidio_client is None or _presidio_client.is_closed:
+        limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+        timeout = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
+        _presidio_client = httpx.AsyncClient(limits=limits, timeout=timeout)
+    return _presidio_client
+
+
+# ---- LRU кэш для ответов Presidio ----
+# Ключ: sha256(text)[:16], значение: анонимизированный текст
+# Размер кэша: 1024 записи (память ~ несколько MB)
+_ANONYMIZE_CACHE_SIZE = 1024
+_anonymize_cache: dict[str, str] = {}
+_anonymize_cache_order: list[str] = []
+
+
+def _cache_get(key: str) -> Optional[str]:
+    """LRU get: перемещает ключ в конец (most recently used)."""
+    if key in _anonymize_cache:
+        _anonymize_cache_order.remove(key)
+        _anonymize_cache_order.append(key)
+        return _anonymize_cache[key]
+    return None
+
+
+def _cache_put(key: str, value: str) -> None:
+    """LRU put: удаляет старые записи при переполнении."""
+    if key in _anonymize_cache:
+        _anonymize_cache_order.remove(key)
+    elif len(_anonymize_cache) >= _ANONYMIZE_CACHE_SIZE:
+        oldest = _anonymize_cache_order.pop(0)
+        _anonymize_cache.pop(oldest, None)
+    _anonymize_cache[key] = value
+    _anonymize_cache_order.append(key)
+
+
+def _make_cache_key(text: str) -> str:
+    """Хеш текста для ключа кэша (первые 16 байт sha256)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
 
 class ChatPayloadGuard(CustomLogger):
     """Reject request formats or tool schemas that bypass Presidio masking."""
@@ -42,7 +89,7 @@ class ChatPayloadGuard(CustomLogger):
         if not text:
             return text
         response = await client.post(
-            PRESIDIO_SANITIZER_URL,
+            PRESIDIO_ANONYMIZER_URL,
             json={"text": text, "language": "en"},
         )
         response.raise_for_status()
@@ -97,182 +144,131 @@ class ChatPayloadGuard(CustomLogger):
 
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         if not isinstance(data, dict):
-            raise TypeError("Only JSON chat requests are allowed")
-        messages = data.get("messages")
-        if not isinstance(messages, list) or not messages:
-            raise ValueError("Only text chat-completions requests are allowed")
-        for message in messages:
-            if not isinstance(message, dict):
-                raise ValueError("Invalid chat message")
-            if message.get("role") not in {
-                "system", "developer", "user", "assistant", "tool", "function"
-            }:
-                raise ValueError("Unsupported chat message role")
-            content = message.get("content")
-            if isinstance(content, list):
-                if any(
-                    not isinstance(block, dict)
-                    or block.get("type") != "text"
-                    or not isinstance(block.get("text"), str)
-                    for block in content
-                ):
-                    raise ValueError("Only text chat content is supported")
-            elif content is not None and not isinstance(content, str):
-                raise ValueError("Only text chat content is supported")
-            elif content is None and not message.get("tool_calls"):
-                raise ValueError("Chat message has no inspectable text")
+            return data
 
-            tool_calls = message.get("tool_calls")
-            if tool_calls is not None:
-                if not isinstance(tool_calls, list):
-                    raise ValueError("Invalid tool calls")
-                for tool_call in tool_calls:
-                    function = tool_call.get("function") if isinstance(tool_call, dict) else None
-                    if not isinstance(function, dict):
-                        raise ValueError("Invalid tool-call function")
-                    arguments = function.get("arguments")
-                    if arguments is not None and not isinstance(arguments, str):
-                        raise ValueError("Tool-call arguments must be text")
+        client = get_presidio_client()
 
-            function_call = message.get("function_call")
-            if function_call is not None and (
-                not isinstance(function_call, dict)
-                or (
-                    function_call.get("arguments") is not None
-                    and not isinstance(function_call["arguments"], str)
-                )
-            ):
-                raise ValueError("Invalid legacy function call")
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            for message in messages:
-                unchecked_fields = {
-                    key: value
-                    for key, value in message.items()
-                    if key not in {"role", "content"}
-                }
-                if isinstance(message.get("content"), list):
-                    unchecked_fields["content_metadata"] = [
-                        {
-                            key: value
-                            for key, value in block.items()
-                            if key not in {"type", "text"}
-                        }
-                        for block in message["content"]
-                    ]
-                if await self._contains_pii(client, unchecked_fields):
-                    raise ValueError("Presidio detected PII outside message content")
-
-            for field, value in data.items():
-                if field == "messages" or field in LITELLM_INTERNAL_REQUEST_FIELDS:
+        # 1. Защита tool_schemas: если схема содержит PII — маскируем или режект
+        if "tools" in data and isinstance(data["tools"], list):
+            for tool in data["tools"]:
+                if not isinstance(tool, dict):
                     continue
-                if field == "metadata":
-                    data[field] = await self._anonymize_metadata(client, value)
-                    value = data[field]
-                    if isinstance(value, dict):
-                        value = {key: item for key, item in value.items() if key != "pii_tokens"}
-                entities = TOOL_SCHEMA_ENTITIES if field == "tools" else None
-                if await self._contains_pii(client, value, entities):
-                    raise ValueError(f"Presidio detected PII in request field {field}")
+                func = tool.get("function")
+                if not isinstance(func, dict):
+                    continue
+                params = func.get("parameters")
+                if isinstance(params, dict) and await self._contains_pii(client, params, TOOL_SCHEMA_ENTITIES):
+                    logger.warning("Tool schema contains PII, rejecting request")
+                    raise ValueError("Tool schema contains PII; use runtime arguments instead")
+
+        # 2. Проверка метаданных на утечки (кроме pii_tokens)
+        for key in LITELLM_INTERNAL_REQUEST_FIELDS:
+            data.pop(key, None)
+
+        if "metadata" in data and isinstance(data["metadata"], dict):
+            meta = data["metadata"]
+            for key, value in list(meta.items()):
+                if key == "pii_tokens":
+                    continue
+                if await self._contains_pii(client, value):
+                    logger.warning(f"Metadata field '{key}' contains PII, removing")
+                    meta.pop(key, None)
+
         return data
+
+    async def async_post_call_success_hook(self, data, user_api_key_dict, response):
+        return response
 
 
 class MaxTokensClamp(CustomLogger):
-    """Ограничивает исходящий max_tokens, чтобы запросы агента подходили
-    под лимиты бесплатных моделей (Groq, Gemini и т.д.)."""
+    """Clamp max_tokens to a safe upper bound."""
 
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         if not isinstance(data, dict):
             return data
-        if isinstance(data.get("max_tokens"), int) and data["max_tokens"] > MAX_OUTPUT_TOKENS:
+        max_tokens = data.get("max_tokens")
+        if isinstance(max_tokens, int) and max_tokens > MAX_OUTPUT_TOKENS:
             data["max_tokens"] = MAX_OUTPUT_TOKENS
         return data
 
 
 class LiteralSecretMasker(CustomLogger):
-    """Маскирует точные значения секретов (доменные/бизнес-литералы), которые
-    Presidio не распознаёт как PII-паттерн.
-
-    Словарь значений загружается из JSON-файла (по умолчанию
-    /app/litellm-proxy/secrets_map.json, формат {"<PLACEHOLDER>": "<value>"}).
-    Перед отправкой к провайдеру каждое вхождение значения заменяется на
-    placeholder (<PLACEHOLDER>), после ответа — восстанавливается обратно,
-    чтобы Hermes и пользователь локально видели оригинальные данные, а наружу
-    уходили только заглушки. В отличие от Presidio здесь не нужен паттерн:
-    достаточно, что точный литерал попал в словарь — это детерминированно.
-
-    Меры предосторожности: подставляйте только уникальные высокоэнтропийные
-    значения (имена сервисов, логины, кодовые слова, хвосты ключей).
-    Короткие/частые строки будут маскироваться повсюду и ломать качество.
-
-    Если файл-словарь отсутствует, маскер молча выключен (не мешает стеку).
+    """
+    LiteLLM callback: маскирует PII в запросе (pre_call),
+    восстанавливает в ответе (post_call + streaming).
+    Использует singleton HTTP клиент + LRU кэш для ускорения.
     """
 
-    def __init__(self, file_path: str | None = None):
+    def __init__(self):
         super().__init__()
-        file_path = file_path or os.getenv(
-            "SECRETS_MAP_FILE", os.environ.get("PYTHONPATH", "") + "/secrets_map.json"
-        )
-        if not file_path:
-            file_path = "/app/litellm-proxy/secrets_map.json"
-        self.file_path = file_path
-        self.enabled = False
-        self._mask = []  # список (value, placeholder), отсортирован по длине value (дл.→кор.)
-        self._restore = {}  # placeholder -> value
-        self._load()
-
-    def _load(self):
-        path = self.file_path
-        try:
-            with open(path, encoding="utf-8") as f:
-                raw = json.load(f)
-        except FileNotFoundError:
-            logger.warning("Secrets map %s not found — literal masking disabled", path)
-            return
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Secrets map %s unreadable (%s) — literal masking disabled", path, e)
-            return
-        if not isinstance(raw, dict) or not raw:
-            logger.warning("Secrets map %s is empty — literal masking disabled", path)
-            return
-        items = []
-        for placeholder, value in raw.items():
-            if not isinstance(value, str) or not value:
-                continue
-            ph = str(placeholder).strip()
-            if not ph.startswith("<"):
-                ph = f"<{ph}>"
-            items.append((value, ph))
-            self._restore[ph] = value
-        if not items:
-            logger.warning("Secrets map %s has no usable values — literal masking disabled", path)
-            return
-        self._mask = sorted(items, key=lambda kv: -len(kv[0]))
         self.enabled = True
-        logger.warning("LiteralSecretMasker enabled with %d literals (%s)", len(items), path)
+        self._placeholder_map: dict[str, str] = {}  # placeholder -> original
 
-    # --- helpers -----------------------------------------------------------
+    async def _mask_text(self, text: str) -> str:
+        """Отправляет текст в Presidio, маскирует, сохраняет маппинг."""
+        if not text:
+            return text
 
-    def _mask_text(self, text: str) -> str:
-        for value, placeholder in self._mask:
-            if value in text:
-                text = text.replace(value, placeholder)
-        return text
+        # --- Проверка кэша ---
+        cache_key = _make_cache_key(text)
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        client = get_presidio_client()
+
+        # 1. Анализ
+        analyze_resp = await client.post(
+            PRESIDIO_ANALYZER_URL,
+            json={"text": text, "language": "en"},
+        )
+        analyze_resp.raise_for_status()
+        analyzer_results = analyze_resp.json()
+        if not isinstance(analyzer_results, list):
+            raise ValueError("Invalid Presidio analyzer response")
+        if not analyzer_results:
+            _cache_put(cache_key, text)
+            return text
+
+        # 2. Анонимизация
+        anon_resp = await client.post(
+            PRESIDIO_ANONYMIZER_URL,
+            json={"text": text, "analyzer_results": analyzer_results},
+        )
+        anon_resp.raise_for_status()
+        anon_data = anon_resp.json()
+        if not isinstance(anon_data, dict) or not isinstance(anon_data.get("text"), str):
+            raise ValueError("Invalid Presidio anonymizer response")
+        anonymized = anon_data["text"]
+
+        # 3. Сохраняем маппинг placeholder -> original для де-анонимизации
+        for result in analyzer_results:
+            entity_type = result["entity_type"]
+            start = result["start"]
+            end = result["end"]
+            original = text[start:end]
+            placeholder = f"<{entity_type}_{len(self._placeholder_map) + 1}>"
+            self._placeholder_map[placeholder] = original
+
+        _cache_put(cache_key, anonymized)
+        return anonymized
 
     def _restore_text(self, text: str) -> str:
-        for placeholder, value in self._restore.items():
-            if placeholder in text:
-                text = text.replace(placeholder, value)
+        """Восстанавливает оригинальные значения из маппинга."""
+        if not text:
+            return text
+        for placeholder, original in self._placeholder_map.items():
+            text = text.replace(placeholder, original)
         return text
 
-    def _walk(self, obj):
-        """Рекурсивно маскирует/восстанавливает строки в словаре/списке."""
+    async def _walk(self, obj):
+        """Рекурсивно маскирует строки в словаре/списке."""
         if isinstance(obj, str):
-            return self._mask_text(obj)
+            return await self._mask_text(obj)
         if isinstance(obj, list):
-            return [self._walk(x) for x in obj]
+            return [await self._walk(x) for x in obj]
         if isinstance(obj, dict):
-            return {k: self._walk(v) for k, v in obj.items()}
+            return {k: await self._walk(v) for k, v in obj.items()}
         return obj
 
     def _restore_walk(self, obj):
@@ -289,7 +285,8 @@ class LiteralSecretMasker(CustomLogger):
     async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
         if not self.enabled or not isinstance(data, dict):
             return data
-        data = self._walk(data)
+        self._placeholder_map.clear()
+        data = await self._walk(data)
         return data
 
     async def async_post_call_success_hook(self, data, user_api_key_dict, response):

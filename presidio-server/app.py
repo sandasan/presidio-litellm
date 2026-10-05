@@ -24,6 +24,14 @@ nlp_configuration = {
 # Инициализируем NLP движок на основе нашей конфигурации
 provider = NlpEngineProvider(nlp_configuration=nlp_configuration)
 nlp_engine = provider.create_engine()
+for lang_code, language_nlp in nlp_engine.nlp.items():
+    for component in reversed(tuple(language_nlp.pipe_names)):
+        if component not in {"tok2vec", "ner"}:
+            language_nlp.remove_pipe(component)
+    print(
+        f"Presidio NLP pipeline {lang_code}: {', '.join(language_nlp.pipe_names)}",
+        flush=True,
+    )
 
 # Передаем мультиязычный nlp_engine в анализатор Presidio
 analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en", "ru", "uk"])

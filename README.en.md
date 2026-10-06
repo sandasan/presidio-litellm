@@ -32,6 +32,20 @@ retries are exhausted, only the unsafe call is withheld and the stream ends with
 a normal assistant message instead of a broken connection. The original value
 cannot be recovered without a mapping.
 
+### Automatic Context Compression
+
+When a session becomes too large (default: more than 67 messages at a limit of 100),
+the bridge automatically compresses the context:
+- Old messages (except the last 30) are replaced with a brief summary
+- The summary contains key points from each message (first 200 characters)
+- The last 30 messages are kept in full for dialogue continuity
+- The response header `X-OpenCode-Context-Compressed: true` indicates compression
+
+Compression settings in `.env`:
+- `OPENCODE_MAX_MESSAGES` — maximum messages per session (default: 100)
+- `OPENCODE_COMPRESSION_THRESHOLD` — compression threshold from 0 to 1 (default: 0.67 = 2/3)
+- `OPENCODE_KEEP_RECENT` — number of recent messages to preserve (default: 30)
+
 Published ports bind to this machine by default. Set
 `STACK_BIND_ADDRESS=0.0.0.0` in `.env` only when LAN access is required. Do not
 expose the APIs directly to the internet: LiteLLM accepts a dummy key and

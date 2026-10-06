@@ -15,6 +15,7 @@ import urllib.request
 import ssl
 import http.client
 from bisect import bisect_right
+from errno import EPIPE
 
 PRESIDIO_URL = "http://127.0.0.1:5001"
 PRESIDIO_ANALYZE_TIMEOUT_SECONDS = float(
@@ -49,6 +50,15 @@ MAX_UNRESOLVED_TOOL_RETRIES = int(
 )
 if MAX_UNRESOLVED_TOOL_RETRIES < 0:
     raise ValueError("Unresolved tool retry count cannot be negative")
+
+# Context compression settings
+MAX_MESSAGES_PER_SESSION = int(os.environ.get("OPENCODE_MAX_MESSAGES", "100"))
+CONTEXT_COMPRESSION_THRESHOLD = float(
+    os.environ.get("OPENCODE_COMPRESSION_THRESHOLD", "0.67")
+)  # 2/3 by default
+if not 0 < CONTEXT_COMPRESSION_THRESHOLD < 1:
+    raise ValueError("Compression threshold must be between 0 and 1")
+KEEP_RECENT_MESSAGES = int(os.environ.get("OPENCODE_KEEP_RECENT", "30"))  # Keep last 30 messages
 
 
 class MappingStore:
@@ -969,6 +979,65 @@ def request_shape_summary(body):
     }
 
 
+def compress_context(messages, replacements, mapping_store, session_id):
+    """
+    Compress context by summarizing old messages and keeping recent ones.
+    Returns compressed messages and indicates if compression was applied.
+    """
+    if len(messages) < MAX_MESSAGES_PER_SESSION * CONTEXT_COMPRESSION_THRESHOLD:
+        return messages, False
+
+    print(
+        f"[Context Compression] Session has {len(messages)} messages, "
+        f"threshold {MAX_MESSAGES_PER_SESSION * CONTEXT_COMPRESSION_THRESHOLD:.0f}. "
+        f"Compressing context, keeping last {KEEP_RECENT_MESSAGES} messages.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    # Split messages: old ones to summarize, recent ones to keep
+    if len(messages) > KEEP_RECENT_MESSAGES:
+        old_messages = messages[:-KEEP_RECENT_MESSAGES]
+        recent_messages = messages[-KEEP_RECENT_MESSAGES:]
+    else:
+        # Not enough messages to compress meaningfully
+        return messages, False
+
+    # Build summary from old messages
+    summary_parts = []
+    for msg in old_messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            # Truncate long content
+            content_preview = content[:200] + "..." if len(content) > 200 else content
+            summary_parts.append(f"[{role}]: {content_preview}")
+        elif isinstance(content, list):
+            summary_parts.append(f"[{role}]: [multimodal content with {len(content)} blocks]")
+        else:
+            summary_parts.append(f"[{role}]: [content]")
+
+    summary_text = " ".join(summary_parts)
+    summary_message = {
+        "role": "system",
+        "content": (
+            f"[CONTEXT SUMMARY: Previous conversation had {len(old_messages)} messages. "
+            f"Key points: {summary_text}]"
+        ),
+    }
+
+    # Create new compressed message list
+    compressed_messages = [summary_message] + recent_messages
+
+    print(
+        f"[Context Compression] Compressed from {len(messages)} to {len(compressed_messages)} messages.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    return compressed_messages, True
+
+
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path != "/health":
@@ -1004,9 +1073,23 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(400, "Missing or invalid OpenCode session identifier")
             return
 
+        # Flag to indicate if context was compressed
+        context_compressed = False
+
         try:
             self.server.mapping_store.prepare_session(session_id, parent_session_id)
             replacements = self.server.mapping_store.list_mappings(session_id)
+
+            # Check if context compression is needed
+            messages = body.get("messages", [])
+            if isinstance(messages, list) and len(messages) >= MAX_MESSAGES_PER_SESSION * CONTEXT_COMPRESSION_THRESHOLD:
+                compressed_messages, was_compressed = compress_context(
+                    messages, replacements, self.server.mapping_store, session_id
+                )
+                if was_compressed:
+                    body["messages"] = compressed_messages
+                    context_compressed = True
+
             anonymized_body = anonymize_value(
                 body, replacements, self.server.mapping_store, session_id
             )
@@ -1058,6 +1141,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     for k, v in response.getheaders():
                         if k.lower() not in ['content-encoding', 'transfer-encoding', 'content-length']:
                             self.send_header(k, v)
+                    if context_compressed:
+                        self.send_header("X-OpenCode-Context-Compressed", "true")
                     self.end_headers()
 
                     for chunk_str in guarded_stream_chunks(
@@ -1066,8 +1151,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         request_body=body,
                         retry_upstream=retry_upstream,
                     ):
-                        self.wfile.write(chunk_str.encode('utf-8'))
-                        self.wfile.flush()
+                        try:
+                            self.wfile.write(chunk_str.encode('utf-8'))
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            # Client disconnected, silently end the response
+                            print("[Stream] Client disconnected (broken pipe)", file=sys.stderr, flush=True)
+                            return
                 else:
                     restored_body = restore_nonstream_response(
                         response.read(), replacements
@@ -1076,6 +1166,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     for k, v in response.getheaders():
                         if k.lower() not in ['content-encoding', 'transfer-encoding', 'content-length']:
                             self.send_header(k, v)
+                    if context_compressed:
+                        self.send_header("X-OpenCode-Context-Compressed", "true")
                     self.send_header("Content-Length", str(len(restored_body)))
                     self.end_headers()
                     self.wfile.write(restored_body)
@@ -1092,10 +1184,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     upstream_error = upstream_error.get("error", upstream_error)
                 error_type = upstream_error.get("type") if isinstance(upstream_error, dict) else None
                 error_code = upstream_error.get("code") if isinstance(upstream_error, dict) else None
+                summary = request_shape_summary(body)
                 print(
                     "[Upstream 400 Details] "
                     + json.dumps({
-                        "request": request_shape_summary(body),
+                        "request": summary,
                         "error_type": safe_diagnostic_label(error_type),
                         "error_code": safe_diagnostic_label(error_code),
                         "error_body_bytes": len(error_body),
@@ -1103,6 +1196,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     file=sys.stderr,
                     flush=True,
                 )
+                # Provide user-friendly error for large sessions
+                if error_type == "invalid_request_error" and summary.get("message_count", 0) > 100:
+                    error_body = json.dumps({
+                        "error": {
+                            "message": (
+                                f"Session context is too large ({summary['message_count']} messages, "
+                                f"{summary['tool_count']} tools). Please start a new conversation or "
+                                "use /clear to reset the context."
+                            ),
+                            "type": "context_limit_exceeded",
+                            "code": "context_too_large"
+                        }
+                    }).encode("utf-8")
             self.send_response(e.code)
             for k, v in e.headers.items():
                 if k.lower() not in ['content-length', 'transfer-encoding']:

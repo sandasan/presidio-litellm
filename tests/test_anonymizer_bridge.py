@@ -19,6 +19,7 @@ from anonymizer_bridge import (
     restored_chunks,
     guarded_stream_chunks,
     session_key,
+    compress_context,
 )
 
 
@@ -446,6 +447,44 @@ class MappingStoreTests(unittest.TestCase):
         replacements = store.list_mappings(current_key)
 
         self.assertEqual(restore_text(html_escaped, replacements), "Alice")
+
+    def test_context_compression_when_threshold_reached(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+        replacements = {}
+
+        # Create a large message list (70 messages, threshold is 67)
+        messages = []
+        for i in range(70):
+            messages.append({"role": "user", "content": f"Message {i}"})
+
+        compressed, was_compressed = compress_context(
+            messages, replacements, store, current_key
+        )
+
+        self.assertTrue(was_compressed)
+        self.assertLess(len(compressed), len(messages))
+        # Should have summary + last 30 messages
+        self.assertEqual(len(compressed), 31)
+        self.assertIn("CONTEXT SUMMARY", compressed[0]["content"])
+        self.assertIn("Message 69", compressed[-1]["content"])
+
+    def test_context_not_compressed_below_threshold(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+        replacements = {}
+
+        # Create a small message list (50 messages, threshold is 67)
+        messages = []
+        for i in range(50):
+            messages.append({"role": "user", "content": f"Message {i}"})
+
+        compressed, was_compressed = compress_context(
+            messages, replacements, store, current_key
+        )
+
+        self.assertFalse(was_compressed)
+        self.assertEqual(len(compressed), len(messages))
 
 
 if __name__ == "__main__":

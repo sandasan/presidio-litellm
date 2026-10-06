@@ -20,6 +20,7 @@ from anonymizer_bridge import (
     guarded_stream_chunks,
     session_key,
     compress_context,
+    get_model_context_limit,
 )
 
 
@@ -485,6 +486,61 @@ class MappingStoreTests(unittest.TestCase):
 
         self.assertFalse(was_compressed)
         self.assertEqual(len(compressed), len(messages))
+
+    def test_model_context_limit_known_models(self):
+        # Test known models
+        self.assertEqual(get_model_context_limit("gpt-4"), 80)
+        self.assertEqual(get_model_context_limit("gpt-4-turbo"), 128)
+        self.assertEqual(get_model_context_limit("claude-3-opus"), 200)
+        self.assertEqual(get_model_context_limit("gemini-pro"), 128)
+        self.assertEqual(get_model_context_limit("mistral-large"), 32)
+        # Test OpenCode Zen free models
+        self.assertEqual(get_model_context_limit("space-bunny"), 500)
+        self.assertEqual(get_model_context_limit("longcat"), 500)
+        self.assertEqual(get_model_context_limit("deepseek-v4-flash"), 280)
+        self.assertEqual(get_model_context_limit("mimo-v2.5"), 100)
+
+    def test_model_context_limit_with_provider_prefix(self):
+        # Test with provider prefixes
+        self.assertEqual(get_model_context_limit("openai/gpt-4"), 80)
+        self.assertEqual(get_model_context_limit("anthropic/claude-3-opus"), 200)
+        self.assertEqual(get_model_context_limit("google/gemini-pro"), 128)
+
+    def test_model_context_limit_unknown_model(self):
+        # Test unknown model returns default
+        self.assertEqual(get_model_context_limit("unknown-model-x"), 100)
+        self.assertEqual(get_model_context_limit(None), 100)
+        self.assertEqual(get_model_context_limit(""), 100)
+
+    def test_model_context_limit_partial_match(self):
+        # Test partial matching
+        self.assertEqual(get_model_context_limit("gpt-4o-mini-001"), 128)  # matches gpt-4o
+        self.assertEqual(get_model_context_limit("claude-3.5-sonnet-v1"), 200)  # matches claude-3.5-sonnet
+        # Test space normalization
+        self.assertEqual(get_model_context_limit("space bunny"), 500)  # matches space-bunny
+        self.assertEqual(get_model_context_limit("long cat"), 500)  # matches longcat
+
+    def test_context_compression_uses_model_limit(self):
+        store = self.new_store()
+        current_key = self.prepare(store, "session-a")
+        replacements = {}
+
+        # Create 60 messages (below default 100, but above gpt-4 limit of 80 * 0.67 = 53)
+        messages = []
+        for i in range(60):
+            messages.append({"role": "user", "content": f"Message {i}"})
+
+        # With gpt-4 (limit 80, threshold 53), should compress
+        compressed, was_compressed = compress_context(
+            messages, replacements, store, current_key, "gpt-4"
+        )
+        self.assertTrue(was_compressed)
+
+        # With gpt-4-turbo (limit 128, threshold 85), should not compress
+        compressed, was_compressed = compress_context(
+            messages, replacements, store, current_key, "gpt-4-turbo"
+        )
+        self.assertFalse(was_compressed)
 
 
 if __name__ == "__main__":

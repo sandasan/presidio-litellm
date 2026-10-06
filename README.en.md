@@ -34,15 +34,36 @@ cannot be recovered without a mapping.
 
 ### Automatic Context Compression
 
-When a session becomes too large (default: more than 67 messages at a limit of 100),
-the bridge automatically compresses the context:
+When a session becomes too large, the bridge automatically compresses the context.
+The message limit is determined dynamically based on the model being used:
+
+| Model | Message Limit | Context |
+|-------|--------------|---------|
+| GPT-4 | 80 | 8K |
+| GPT-4 Turbo/GPT-4o | 128 | 128K |
+| Claude 3.5 Sonnet | 200 | 200K |
+| Gemini 1.5 Pro | 280 | 1M |
+| Mistral Large | 32 | 32K |
+| Space Bunny Free* | 500 | Unlimited (dynamic) |
+| LongCat 2.5 Preview Free* | 500 | Extended (Preview) |
+| DeepSeek V4 Flash Free | 280 | Up to 1M tokens |
+| MiMo-V2.5 Free | 100 | Standard |
+| Ling 3.0 Flash Fin Free | 100 | Standard |
+| Nemotron 3.5 Lightning Free | 100 | Standard |
+
+*Models with limited time availability. For models without a fixed daily counter,
+OpenCode does not set a unified quota; limits are calculated dynamically based on context volume.
+
+For unknown models, the value from `OPENCODE_MAX_MESSAGES` is used (default: 100).
+
+Compression occurs when 2/3 of the model's limit is reached:
 - Old messages (except the last 30) are replaced with a brief summary
 - The summary contains key points from each message (first 200 characters)
 - The last 30 messages are kept in full for dialogue continuity
 - The response header `X-OpenCode-Context-Compressed: true` indicates compression
 
 Compression settings in `.env`:
-- `OPENCODE_MAX_MESSAGES` — maximum messages per session (default: 100)
+- `OPENCODE_MAX_MESSAGES` — fallback limit for unknown models (default: 100)
 - `OPENCODE_COMPRESSION_THRESHOLD` — compression threshold from 0 to 1 (default: 0.67 = 2/3)
 - `OPENCODE_KEEP_RECENT` — number of recent messages to preserve (default: 30)
 

@@ -52,13 +52,98 @@ if MAX_UNRESOLVED_TOOL_RETRIES < 0:
     raise ValueError("Unresolved tool retry count cannot be negative")
 
 # Context compression settings
-MAX_MESSAGES_PER_SESSION = int(os.environ.get("OPENCODE_MAX_MESSAGES", "100"))
+DEFAULT_MAX_MESSAGES = int(os.environ.get("OPENCODE_MAX_MESSAGES", "100"))
 CONTEXT_COMPRESSION_THRESHOLD = float(
     os.environ.get("OPENCODE_COMPRESSION_THRESHOLD", "0.67")
 )  # 2/3 by default
 if not 0 < CONTEXT_COMPRESSION_THRESHOLD < 1:
     raise ValueError("Compression threshold must be between 0 and 1")
 KEEP_RECENT_MESSAGES = int(os.environ.get("OPENCODE_KEEP_RECENT", "30"))  # Keep last 30 messages
+
+# Model context limits (maximum messages, assuming average 100 tokens per message)
+# Based on common model context windows and typical message sizes
+MODEL_CONTEXT_LIMITS = {
+    # GPT-4 models
+    "gpt-4": 80,  # 8K context
+    "gpt-4-32k": 320,  # 32K context
+    "gpt-4-turbo": 128,  # 128K context
+    "gpt-4o": 128,  # 128K context
+    "gpt-4o-mini": 128,  # 128K context
+    # Claude models
+    "claude-3-opus": 200,  # 200K context
+    "claude-3-sonnet": 200,  # 200K context
+    "claude-3-haiku": 200,  # 200K context
+    "claude-3.5-sonnet": 200,  # 200K context
+    # Gemini models
+    "gemini-pro": 128,  # 128K context
+    "gemini-1.5-pro": 280,  # 1M context
+    "gemini-1.5-flash": 280,  # 1M context
+    # Mistral models
+    "mistral-large": 32,  # 32K context
+    "mistral-medium": 32,  # 32K context
+    "mistral-small": 32,  # 32K context
+    "mixtral-8x7b": 32,  # 32K context
+    "mixtral-8x22b": 64,  # 64K context
+    # Llama models
+    "llama-3-70b": 8,  # 8K context
+    "llama-3-8b": 8,  # 8K context
+    "llama-3.1-405b": 128,  # 128K context
+    "llama-3.1-70b": 128,  # 128K context
+    "llama-3.1-8b": 128,  # 128K context
+    # Groq models
+    "llama3-70b-8192": 80,  # 8K context
+    "llama3-8b-8192": 80,  # 8K context
+    "mixtral-8x7b-32768": 320,  # 32K context
+    # Other common models
+    "deepseek-chat": 128,  # 128K context
+    "deepseek-v4-flash": 280,  # 1M context, limited by daily quota (~200 requests/day)
+    "qwen-72b-chat": 32,  # 32K context
+    "yi-34b-chat": 4,  # 4K context
+    # OpenCode Zen free models (high or unlimited context, may have daily quotas)
+    "space-bunny": 500,  # Unlimited context, limited time availability
+    "longcat": 500,  # Extended context (Preview), limited time availability
+    "mimo": 100,  # Standard context, provider session dependent
+    "mimo-v2.5": 100,  # Standard context, provider session dependent
+    "ling": 100,  # Standard context, provider session dependent
+    "ling-3.0": 100,  # Standard context, provider session dependent
+    "nemotron": 100,  # Standard context, provider session dependent
+    "nemotron-3.5": 100,  # Standard context, provider session dependent
+    "nemotron-3.5-lightning": 100,  # Standard context, provider session dependent
+}
+
+
+def get_model_context_limit(model_name):
+    """
+    Get the maximum number of messages for a given model.
+    Returns the limit from MODEL_CONTEXT_LIMITS or DEFAULT_MAX_MESSAGES.
+    """
+    if not model_name:
+        return DEFAULT_MAX_MESSAGES
+
+    # Normalize model name (remove provider prefixes, version suffixes, spaces)
+    normalized = model_name.lower().strip()
+    # Replace spaces with hyphens for consistent matching
+    normalized = normalized.replace(" ", "-")
+    # Remove common prefixes
+    for prefix in ["openai/", "anthropic/", "google/", "mistralai/", "meta/", "groq/"]:
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+    # Remove version suffixes (e.g., -latest, -v1, etc.)
+    for suffix in ["-latest", "-v1", "-v2", "-v3", "-001", "-002", "-free", "-preview"]:
+        if normalized.endswith(suffix):
+            normalized = normalized[:-len(suffix)]
+
+    # Try exact match first
+    if normalized in MODEL_CONTEXT_LIMITS:
+        return MODEL_CONTEXT_LIMITS[normalized]
+
+    # Try partial match (e.g., "gpt-4o-mini" matches "gpt-4o")
+    for model_pattern, limit in MODEL_CONTEXT_LIMITS.items():
+        if model_pattern in normalized or normalized in model_pattern:
+            return limit
+
+    # Default fallback
+    return DEFAULT_MAX_MESSAGES
 
 
 class MappingStore:
@@ -979,17 +1064,21 @@ def request_shape_summary(body):
     }
 
 
-def compress_context(messages, replacements, mapping_store, session_id):
+def compress_context(messages, replacements, mapping_store, session_id, model_name=None):
     """
     Compress context by summarizing old messages and keeping recent ones.
     Returns compressed messages and indicates if compression was applied.
     """
-    if len(messages) < MAX_MESSAGES_PER_SESSION * CONTEXT_COMPRESSION_THRESHOLD:
+    max_messages = get_model_context_limit(model_name)
+    threshold = int(max_messages * CONTEXT_COMPRESSION_THRESHOLD)
+
+    if len(messages) < threshold:
         return messages, False
 
     print(
         f"[Context Compression] Session has {len(messages)} messages, "
-        f"threshold {MAX_MESSAGES_PER_SESSION * CONTEXT_COMPRESSION_THRESHOLD:.0f}. "
+        f"model {model_name or 'unknown'} (limit {max_messages}), "
+        f"threshold {threshold}. "
         f"Compressing context, keeping last {KEEP_RECENT_MESSAGES} messages.",
         file=sys.stderr,
         flush=True,
@@ -1080,11 +1169,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.server.mapping_store.prepare_session(session_id, parent_session_id)
             replacements = self.server.mapping_store.list_mappings(session_id)
 
-            # Check if context compression is needed
+            # Check if context compression is needed (using model-specific limit)
             messages = body.get("messages", [])
-            if isinstance(messages, list) and len(messages) >= MAX_MESSAGES_PER_SESSION * CONTEXT_COMPRESSION_THRESHOLD:
+            model_limit = get_model_context_limit(model_id)
+            if isinstance(messages, list) and len(messages) >= model_limit * CONTEXT_COMPRESSION_THRESHOLD:
                 compressed_messages, was_compressed = compress_context(
-                    messages, replacements, self.server.mapping_store, session_id
+                    messages, replacements, self.server.mapping_store, session_id, model_id
                 )
                 if was_compressed:
                     body["messages"] = compressed_messages

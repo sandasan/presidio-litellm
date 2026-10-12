@@ -614,6 +614,20 @@ def anonymize_value(value, replacements, mapping_store, session_id):
         if isinstance(node, list):
             return [rebuild(item) for item in node]
         if isinstance(node, dict):
+            # Special handling for tool_call function.arguments - it's a JSON string
+            if "function" in node and isinstance(node["function"], dict):
+                func = node["function"]
+                if "arguments" in func and isinstance(func["arguments"], str):
+                    try:
+                        # Parse the JSON arguments
+                        args_dict = json.loads(func["arguments"])
+                        # Recursively anonymize the parsed dict
+                        anonymized_args = anonymize_value(args_dict, replacements, mapping_store, session_id)
+                        # Re-serialize back to JSON string
+                        func["arguments"] = json.dumps(anonymized_args, ensure_ascii=False)
+                    except (json.JSONDecodeError, TypeError):
+                        # If parsing fails, leave as-is (will be handled by text anonymization)
+                        pass
             return {rebuild(key): rebuild(item) for key, item in node.items()}
         return node
 
@@ -676,12 +690,20 @@ def validate_chat_request(body, path):
 
 def restore_text(text, replacements):
     def replace_placeholder(match):
-        original_value = replacements.get(canonical_placeholder(match.group(0)))
+        placeholder = canonical_placeholder(match.group(0))
+        original_value = replacements.get(placeholder)
         if original_value is None:
-            return UNRESOLVED_PLACEHOLDER
+            # Log unresolved placeholders for debugging
+            print(f"[Restore Debug] Unresolved placeholder: {placeholder}", file=sys.stderr, flush=True)
+            return "[sanitized_data]"
         return original_value
 
-    return PLACEHOLDER_PATTERN.sub(replace_placeholder, text)
+    result = PLACEHOLDER_PATTERN.sub(replace_placeholder, text)
+    # Log if any placeholders remain in the result
+    remaining = PLACEHOLDER_PATTERN.findall(result)
+    if remaining:
+        print(f"[Restore Debug] {len(remaining)} placeholders remain in output: {remaining[:5]}", file=sys.stderr, flush=True)
+    return result
 
 
 def restored_chunks(response, replacements):
@@ -698,9 +720,14 @@ def restored_chunks(response, replacements):
         encoded_tokens = []
         for placeholder in replacements:
             encoded_tokens.append(placeholder)
+            # Варианты с юникодом в нижнем и верхнем регистре
             encoded_tokens.append(
                 placeholder.replace("<", "\\u003c").replace(">", "\\u003e")
             )
+            encoded_tokens.append(
+                placeholder.replace("<", "\\u003C").replace(">", "\\u003E")
+            )
+            # Варианты с HTML-сущностями
             encoded_tokens.append(
                 placeholder.replace("<", "&lt;").replace(">", "&gt;")
             )
@@ -942,15 +969,35 @@ def contains_unresolved_placeholder(value, replacements):
 
 def restore_json_value(value, replacements):
     if isinstance(value, str):
-        return PLACEHOLDER_PATTERN.sub(
-            lambda match: replacements.get(
-                canonical_placeholder(match.group(0)), UNRESOLVED_PLACEHOLDER
-            ),
-            value,
-        )
+        def replace_placeholder(match):
+            placeholder = canonical_placeholder(match.group(0))
+            original = replacements.get(placeholder)
+            if original is not None:
+                return original
+            # Unknown placeholder - replace with generic text instead of UNRESOLVED_PLACEHOLDER
+            # This prevents the model from leaking its own generated placeholders
+            return "[sanitized_data]"
+        return PLACEHOLDER_PATTERN.sub(replace_placeholder, value)
     if isinstance(value, list):
         return [restore_json_value(item, replacements) for item in value]
     if isinstance(value, dict):
+        # Special handling for tool_call function.arguments - it's a JSON string
+        if "function" in value and isinstance(value["function"], dict):
+            func = value["function"]
+            if "arguments" in func and isinstance(func["arguments"], str):
+                try:
+                    # Parse the JSON arguments
+                    args_dict = json.loads(func["arguments"])
+                    # Recursively restore placeholders in the parsed dict
+                    restored_args = restore_json_value(args_dict, replacements)
+                    # Re-serialize back to JSON string
+                    func["arguments"] = json.dumps(restored_args, ensure_ascii=False)
+                except (json.JSONDecodeError, TypeError):
+                    # If parsing fails, just do string replacement (best effort)
+                    func["arguments"] = PLACEHOLDER_PATTERN.sub(
+                        lambda match: replacements.get(canonical_placeholder(match.group(0)), "[sanitized_data]"),
+                        func["arguments"]
+                    )
         return {
             restore_json_value(key, replacements): restore_json_value(item, replacements)
             for key, item in value.items()
@@ -1098,11 +1145,21 @@ def compress_context(messages, replacements, mapping_store, session_id, model_na
         role = msg.get("role", "unknown")
         content = msg.get("content", "")
         if isinstance(content, str):
+            # Deanonymize content before summarizing
+            restored_content = restore_text(content, replacements)
             # Truncate long content
-            content_preview = content[:200] + "..." if len(content) > 200 else content
+            content_preview = restored_content[:200] + "..." if len(restored_content) > 200 else restored_content
             summary_parts.append(f"[{role}]: {content_preview}")
         elif isinstance(content, list):
-            summary_parts.append(f"[{role}]: [multimodal content with {len(content)} blocks]")
+            # Deanonymize list content and show text blocks
+            restored_content = restore_json_value(content, replacements)
+            text_blocks = [block.get("text", "") for block in restored_content if isinstance(block, dict) and block.get("type") == "text"]
+            if text_blocks:
+                combined_text = " ".join(text_blocks)
+                content_preview = combined_text[:200] + "..." if len(combined_text) > 200 else combined_text
+                summary_parts.append(f"[{role}]: {content_preview}")
+            else:
+                summary_parts.append(f"[{role}]: [multimodal content with {len(content)} blocks]")
         else:
             summary_parts.append(f"[{role}]: [content]")
 

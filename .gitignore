@@ -25,3 +25,4 @@ logs/
 litellm-proxy/config.yaml
 litellm-proxy/config.json
 .omniroute-health.json
+.omniroute-catalog.json

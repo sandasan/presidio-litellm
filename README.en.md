@@ -278,6 +278,30 @@ keys themselves never reach the LiteLLM container). In Open WebUI, pick any
 route from the `/v1/models` dropdown — for ordinary conversation choose
 `cloud-sanitized-chat` so agent quota exhaustion does not affect it.
 
+### Updating Open WebUI
+
+To update Open WebUI to the latest version:
+
+```bash
+# 1. Pull the new image from the registry
+docker pull ghcr.io/open-webui/open-webui:main
+
+# 2. Recreate the container with the new image
+docker compose up -d open-webui
+
+# 3. Wait for the container to become healthy (approximately 1-2 minutes)
+docker ps --filter "name=open-webui"
+```
+
+Open WebUI data (chat history, settings, users) is stored in the `open-webui-data`
+volume and persists across updates. After the update completes, Open WebUI is
+available at **http://localhost:3000**.
+
+To check the container status:
+```bash
+docker logs --tail 30 open-webui
+```
+
 Note: a provider-specific route does not fail over to other providers — when
 that provider's free-tier quota is exhausted, the request returns a rate-limit
 error (LiteLLM retries the same route). For maximum resilience use

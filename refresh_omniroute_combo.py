@@ -11,9 +11,10 @@ Two independent pools are probed and refreshed:
   (non-empty content plus [DONE]). This keeps the chat usable even when agent
   quotas for tool-capable models are exhausted.
 
-Providers without an API key in `.env` are skipped (their targeted models never
-run). Cerebras is listed as a candidate: once billing is activated it starts
-passing the probe and is added automatically to both combos.
+Candidates are now automatically discovered from OmniRoute API instead of being
+hardcoded. The script fetches all available models from connected providers,
+filters them by capabilities (tool_calling for agent pool), and probes each one.
+Providers without an API key in `.env` are skipped automatically.
 """
 
 from __future__ import annotations
@@ -32,42 +33,32 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 PROJECT_DIR = Path(__file__).resolve().parent
 STATE_FILE = PROJECT_DIR / ".omniroute-health.json"
+CATALOG_CACHE_FILE = PROJECT_DIR / ".omniroute-catalog.json"
 AGENT_COMBO = "cloud-auto"
 CHAT_COMBO = "cloud-chat"
 SUCCESS_TTL = 300
 FAILURE_COOLDOWN = 900
 PROBE_TIMEOUT = 30
+CATALOG_CACHE_TTL = 600  # Кэшировать каталог на 10 минут
 
-# Агентный пул: обязательны tool-calls и большой контекст.
-AGENT_CANDIDATES = [
-    {"provider": "mistral", "model": "ministral-8b-latest", "weight": 4},
-    {"provider": "mistral", "model": "mistral-small-latest", "weight": 5},
-    {"provider": "gemini", "model": "gemini-flash-latest", "weight": 4},
-    {"provider": "cerebras", "model": "qwen-3.8-27b", "weight": 5},
+# Провайдеры, которые нужно пропускать (например, платные или нестабильные)
+EXCLUDED_PROVIDERS = {"openrouter-free", "local"}
+
+# Direct провайдеры с бесплатными тирами (приоритет над openrouter)
+DIRECT_PROVIDERS = {"mistral", "gemini", "groq", "cerebras"}
+
+# Паттерны для фильтрации платных моделей (исключаем модели с этими признаками)
+PAID_MODEL_PATTERNS = [
+    "-high", "-medium", "-low", "-xhigh", "-none",  # Effort tiers
+    "-pro", "-ultra", "-preview",  # Premium tiers
+    "grok", "gpt-5", "gpt-6", "gpt-astra", "gpt-sol", "gpt-terra", "gpt-luna",  # Платные GPT
+    "claude-fable", "claude-opus",  # Платные Claude
+    "muse-spark",  # Платные Meta
+    "mercury", "schematron",  # Платные модели
 ]
 
-# Чат-пул: tool-calls не нужны. Здесь шире диапазон провайдеров, включая те,
-# что не тянут большие контексты агента (Groq) и нестабильные free-модели
-# OpenRouter — они отсеются probe'ом, если не стримят до [DONE].
-CHAT_CANDIDATES = [
-    {"provider": "mistral", "model": "mistral-small-latest", "weight": 5},
-    {"provider": "gemini", "model": "gemini-flash-latest", "weight": 4},
-    {"provider": "gemini", "model": "gemini-flash-lite-latest", "weight": 3},
-    {"provider": "groq", "model": "openai/gpt-oss-120b", "weight": 4},
-    {"provider": "groq", "model": "openai/gpt-oss-20b", "weight": 3},
-    {"provider": "groq", "model": "qwen/qwen3.8-27b", "weight": 2},
-    {"provider": "mistral", "model": "ministral-8b-latest", "weight": 3},
-    {"provider": "cerebras", "model": "openai/gpt-oss-120b", "weight": 3},
-    {"provider": "cerebras", "model": "qwen-3.8-27b", "weight": 2},
-    {"provider": "openrouter", "model": "qwen/qwen3.8-27b:free", "weight": 1},
-    {"provider": "openrouter", "model": "z-ai/glm-5.2:free", "weight": 1},
-    {"provider": "openrouter", "model": "nvidia/nemotron-3.5-lightning:free", "weight": 1},
-]
-
-POOLS = [
-    (AGENT_COMBO, AGENT_CANDIDATES, True),
-    (CHAT_COMBO, CHAT_CANDIDATES, False),
-]
+# Ограничение на количество моделей для проверки (чтобы не перегружать)
+MAX_MODELS_TO_PROBE = 50
 
 
 def load_env() -> None:
@@ -94,6 +85,148 @@ class OmniRoute:
         self.password = os.getenv("OMNIROUTE_INITIAL_PASSWORD", "omniro2026!")
         self.api_key = os.getenv("OMNIROUTE_API_KEY", "sk-omniroute")
         self.opener = build_opener(HTTPCookieProcessor(CookieJar()))
+
+    def get_connected_providers(self) -> list[str]:
+        """Получить список подключённых провайдеров (из .env ключей)."""
+        providers = []
+        env_providers = ["openrouter", "gemini", "groq", "mistral", "cerebras"]
+        for provider in env_providers:
+            if os.getenv(f"{provider.upper()}_API_KEY"):
+                providers.append(provider)
+        return providers
+
+    def fetch_all_models(self) -> list[dict[str, Any]]:
+        """Получить все доступные модели из OmniRoute API с кэшированием."""
+        now = int(time.time())
+
+        # Проверяем кэш
+        if CATALOG_CACHE_FILE.exists():
+            try:
+                cached = json.loads(CATALOG_CACHE_FILE.read_text())
+                cached_time = cached.get("timestamp", 0)
+                if now - cached_time < CATALOG_CACHE_TTL:
+                    log(f"Using cached model catalog (age: {now - cached_time}s)")
+                    return cached.get("models", [])
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        # Запрашиваем свежий каталог
+        request = Request(
+            f"{self.base_url}/v1/models?prefix=alias",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+        )
+        try:
+            with self.opener.open(request, timeout=PROBE_TIMEOUT) as response:
+                data = json.loads(response.read().decode())
+                models = data.get("data", [])
+
+                # Сохраняем в кэш
+                cache_data = {"timestamp": now, "models": models}
+                CATALOG_CACHE_FILE.write_text(json.dumps(cache_data, indent=2))
+                log(f"Fetched {len(models)} models from OmniRoute API (cached)")
+                return models
+        except (HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
+            log(f"Failed to fetch models: {exc}")
+            # Если есть кэш, используем его даже если устарел
+            if CATALOG_CACHE_FILE.exists():
+                try:
+                    cached = json.loads(CATALOG_CACHE_FILE.read_text())
+                    log("Using stale cached model catalog as fallback")
+                    return cached.get("models", [])
+                except (OSError, json.JSONDecodeError):
+                    pass
+            return []
+
+    def get_model_candidates(
+        self, require_tool_calls: bool
+    ) -> list[dict[str, Any]]:
+        """Автоматически собрать кандидатов из OmniRoute API.
+
+        Фильтрует модели по:
+        - Подключённому провайдеру (есть API ключ в .env)
+        - Поддержке tool-calls (если требуется для agent пула)
+        - Исключённым провайдерам
+        - Платным паттернам ( effort tiers, premium prefixes)
+        - Для openrouter: только модели с :free суффиксом
+        - Для direct провайдеров: все модели (они имеют бесплатные тиры)
+        - Ограничивает количество моделей для проверки
+        """
+        all_models = self.fetch_all_models()
+        connected_providers = set(self.get_connected_providers())
+        candidates = []
+
+        for model in all_models:
+            # Пропускаем комбо и модели без провайдера
+            if model.get("owned_by") == "combo":
+                continue
+
+            model_id = model.get("id", "")
+            if not model_id:
+                continue
+
+            # Определяем провайдера из model_id (формат: provider/model или provider/model:variant)
+            parts = model_id.split("/")
+            if len(parts) < 2:
+                continue
+
+            provider = parts[0]
+            if provider in EXCLUDED_PROVIDERS:
+                continue
+
+            # Проверяем, что провайдер подключён
+            if provider not in connected_providers:
+                continue
+
+            # Для openrouter: только бесплатные модели (:free суффикс)
+            if provider == "openrouter" and ":free" not in model_id:
+                continue
+
+            # Фильтруем платные модели по паттернам
+            model_lower = model_id.lower()
+            if any(pattern in model_lower for pattern in PAID_MODEL_PATTERNS):
+                continue
+
+            # Проверяем поддержку tool-calls (для agent пула)
+            capabilities = model.get("capabilities", {})
+            if require_tool_calls and not capabilities.get("tool_calling", False):
+                continue
+
+            # Собираем информацию о модели
+            model_name = parts[1] if len(parts) > 1 else model_id
+            # Убираем суффиксы вроде :free
+            if ":free" in model_name:
+                model_name = model_name.split(":free")[0]
+
+            # Веса: выше для direct провайдеров, моделей с большим контекстом и tool-calls
+            context_length = model.get("context_length", 0)
+            weight = 3  # базовый вес
+            if provider in DIRECT_PROVIDERS:
+                weight += 3  # приоритет direct провайдеров
+            if context_length >= 100000:
+                weight += 2
+            elif context_length >= 32000:
+                weight += 1
+            if require_tool_calls:
+                weight += 1  # приоритет для моделей с tool-calls
+
+            candidates.append(
+                {
+                    "provider": provider,
+                    "model": model_id,
+                    "weight": weight,
+                    "context_length": context_length,
+                }
+            )
+
+        # Сортируем по весу (убывание)
+        candidates.sort(key=lambda x: x["weight"], reverse=True)
+
+        # Ограничиваем количество моделей для проверки
+        if len(candidates) > MAX_MODELS_TO_PROBE:
+            log(f"Limiting candidates from {len(candidates)} to {MAX_MODELS_TO_PROBE}")
+            candidates = candidates[:MAX_MODELS_TO_PROBE]
+
+        return candidates
 
     def request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
         body = json.dumps(payload).encode() if payload is not None else None
@@ -215,10 +348,13 @@ def run_pool(route: OmniRoute, state: dict[str, dict[str, Any]], combo: str,
     mode = "agent" if require_tool_calls else "chat"
     for candidate in candidates:
         provider = candidate["provider"]
+        model_id = candidate["model"]
+        # Пропускаем, если нет API ключа (хотя get_model_candidates уже фильтрует)
         if not os.getenv(f"{provider.upper()}_API_KEY"):
             log(f"skip {mode}: {provider} (no API key)")
             continue
-        key = f"{mode}/{provider}/{candidate['model']}"
+        # Используем model_id как ключ в state (он уникален)
+        key = f"{mode}/{model_id}"
         previous = state.get(key, {})
         checked = int(previous.get("checked", 0))
         ttl = SUCCESS_TTL if previous.get("ok") else FAILURE_COOLDOWN
@@ -230,7 +366,7 @@ def run_pool(route: OmniRoute, state: dict[str, dict[str, Any]], combo: str,
                 log(f"cooldown ({mode}): {key} ({previous.get('reason', 'failed')})")
             continue
 
-        ok, reason = route.probe(candidate["model"], require_tool_calls)
+        ok, reason = route.probe(model_id, require_tool_calls)
         state[key] = {"checked": now, "ok": ok, "reason": reason}
         if ok:
             active.append(candidate)
@@ -268,8 +404,24 @@ def run_once() -> int:
         return 1
 
     code = 0
-    for combo, candidates, require_tool_calls in POOLS:
-        code |= run_pool(route, state, combo, candidates, require_tool_calls)
+
+    # Динамически получаем кандидатов для agent пула (требуются tool-calls)
+    log("Fetching agent pool candidates (require tool_calls)...")
+    agent_candidates = route.get_model_candidates(require_tool_calls=True)
+    if agent_candidates:
+        log(f"Found {len(agent_candidates)} agent candidates")
+        code |= run_pool(route, state, AGENT_COMBO, agent_candidates, True)
+    else:
+        log("No agent candidates found, skipping agent pool")
+
+    # Динамически получаем кандидаты для chat пула (tool-calls не обязательны)
+    log("Fetching chat pool candidates (no tool_calls requirement)...")
+    chat_candidates = route.get_model_candidates(require_tool_calls=False)
+    if chat_candidates:
+        log(f"Found {len(chat_candidates)} chat candidates")
+        code |= run_pool(route, state, CHAT_COMBO, chat_candidates, False)
+    else:
+        log("No chat candidates found, skipping chat pool")
 
     save_state(state)
     return code

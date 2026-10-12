@@ -240,19 +240,28 @@ There are two independent pools with separate failover scopes:
 
 - `cloud-auto` (agent) backs `cloud-sanitized-auto`. It keeps only models that
   pass a streaming **tool-call** probe — Hermes needs tool calls and a large
-  context. Candidates: Mistral and Gemini (plus Cerebras once billing is active).
+  context. Candidates are **automatically discovered** from OmniRoute API.
 - `cloud-chat` (chat) backs `cloud-sanitized-chat`. It accepts any model that
   streams a plain completion — tool calls are NOT required. It therefore holds a
   wider set of free models, including Groq (short chat contexts are fine) and
   light Gemini/Mistral tiers.
 
-Because the pools are separate, exhausting agent quotas for tool-capable models
-does not break Open WebUI: the chat pool falls back to its own set of healthy
-free models. `refresh_omniroute_combo.py` probes each pool with its own criteria
-and updates the two combos independently. Groq is not part of `cloud-auto`
-(its current TPM limits reject normal Hermes contexts) — use the dedicated
-`cloud-sanitized-groq` route instead. Unreliable OpenRouter free models are
-probed too but usually drop out on SSE stalls, billing 401s, or rate limits.
+`refresh_omniroute_combo.py` automatically discovers available models through
+OmniRoute API (`/v1/models?prefix=alias`) and forms the pools:
+
+- **Agent pool** (`cloud-auto`): only models with tool-calling support (required for Hermes).
+  Probed with a streaming tool-call to `[DONE]`.
+- **Chat pool** (`cloud-chat`): all models (tool-calls not required).
+  Probed with a plain streaming completion.
+
+The script filters models by:
+- Connected provider (API key present in `.env`)
+- Paid patterns (effort tiers, premium prefixes)
+- For OpenRouter: only models with `:free` suffix
+- For direct providers (Mistral, Gemini, Groq): all models
+- Limit on number of models to probe (MAX_MODELS_TO_PROBE=50)
+
+The model catalog is cached for 10 minutes (`.omniroute-catalog.json`) for speed.
 Provisioning does not seed `cloud-auto` or `cloud-chat` with unverified models:
 only probe-passing candidates are written, and a combo with no healthy
 candidates is removed.
@@ -275,13 +284,17 @@ error (LiteLLM retries the same route). For maximum resilience use
 `cloud-sanitized-auto` (agent) and `cloud-sanitized-chat` (chat): each fails
 over inside its own pool.
 
-`refresh_omniroute_combo.py` probes targets per pool — the agent pool with a
-streaming tool call (requires a tool call plus a terminal SSE event), the chat
-pool with a plain streaming completion (requires assistant content; tool calls
-not needed). Each combo is updated only with models that passed its criteria.
+`refresh_omniroute_combo.py` automatically discovers available models from
+OmniRoute API, filters them by provider and capability, then probes each pool
+with its own criteria:
+
+- Agent pool: streaming tool call (requires a tool call plus a terminal SSE event)
+- Chat pool: plain streaming completion (requires assistant content; tool calls not needed)
+
+Each combo is updated only with models that passed its criteria.
 Results are cached for five minutes after success and fifteen minutes after
-failure. If every target fails, the previous combo is kept. Run it once or
-continuously:
+failure. The model catalog itself is cached for 10 minutes to speed up discovery.
+If every target fails, the previous combo is kept. Run it once or continuously:
 
 ```bash
 python3 refresh_omniroute_combo.py

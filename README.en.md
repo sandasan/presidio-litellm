@@ -259,7 +259,7 @@ The script filters models by:
 - Paid patterns (effort tiers, premium prefixes)
 - For OpenRouter: only models with `:free` suffix
 - For direct providers (Mistral, Gemini, Groq): all models
-- Limit on number of models to probe (MAX_MODELS_TO_PROBE=50)
+- Limit on number of models in combo after availability check (MAX_MODELS_TO_PROBE=50)
 
 The model catalog is cached for 10 minutes (`.omniroute-catalog.json`) for speed.
 Provisioning does not seed `cloud-auto` or `cloud-chat` with unverified models:

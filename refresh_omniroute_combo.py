@@ -57,7 +57,8 @@ PAID_MODEL_PATTERNS = [
     "mercury", "schematron",  # Платные модели
 ]
 
-# Ограничение на количество моделей для проверки (чтобы не перегружать)
+# Ограничение на количество здоровых моделей в комбо после проверки доступности
+# (применяется ПОСЛЕ probe, чтобы гарантировать наличие работоспособных моделей)
 MAX_MODELS_TO_PROBE = 50
 
 
@@ -149,7 +150,8 @@ class OmniRoute:
         - Платным паттернам ( effort tiers, premium prefixes)
         - Для openrouter: только модели с :free суффиксом
         - Для direct провайдеров: все модели (они имеют бесплатные тиры)
-        - Ограничивает количество моделей для проверки
+
+        Ограничение на количество моделей применяется ПОСЛЕ проверки доступности.
         """
         all_models = self.fetch_all_models()
         connected_providers = set(self.get_connected_providers())
@@ -220,11 +222,6 @@ class OmniRoute:
 
         # Сортируем по весу (убывание)
         candidates.sort(key=lambda x: x["weight"], reverse=True)
-
-        # Ограничиваем количество моделей для проверки
-        if len(candidates) > MAX_MODELS_TO_PROBE:
-            log(f"Limiting candidates from {len(candidates)} to {MAX_MODELS_TO_PROBE}")
-            candidates = candidates[:MAX_MODELS_TO_PROBE]
 
         return candidates
 
@@ -382,6 +379,11 @@ def run_pool(route: OmniRoute, state: dict[str, dict[str, Any]], combo: str,
             return 1
         log(f"{combo} removed: no healthy models")
         return 1
+
+    # Ограничиваем количество моделей ПОСЛЕ проверки доступности
+    if len(active) > MAX_MODELS_TO_PROBE:
+        log(f"Limiting healthy models from {len(active)} to {MAX_MODELS_TO_PROBE}")
+        active = active[:MAX_MODELS_TO_PROBE]
 
     try:
         route.update_combo(combo, active)

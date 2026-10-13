@@ -69,6 +69,9 @@ def build_routes() -> list[tuple[str, dict]]:
             continue
         if name == "auto":
             routes.append((MODEL_NAME_AUTO, omniroute_route("cloud-auto")))
+            # Добавляем алиас для совместимости с плагином PhpStorm
+            routes.append(("big-pickle", omniroute_route("cloud-auto")))
+            routes.append(("gpt-5.4-nano", omniroute_route("cloud-auto")))
         elif name == "chat":
             routes.append((MODEL_NAME_CHAT, omniroute_route("cloud-chat")))
         elif name == "opencode":
@@ -92,7 +95,7 @@ def opencode_free_upstream_route(target_model_name: str) -> dict:
     """
     return {
         "model": f"openai/{target_model_name}", # Показываем LiteLLM, что это валидный OpenAI эндпоинт
-        "api_base": "https://104.21.32",
+        "api_base": "https://opencode.ai",
         "api_key": "not-needed-for-free-tier",
         "forward_client_headers": True,
         "max_tokens": 4096,

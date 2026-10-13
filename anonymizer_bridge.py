@@ -1252,10 +1252,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(503, "Presidio anonymization unavailable")
             return
 
-        upstream_headers = {k: v for k, v in self.headers.items() if k.lower() not in ['host', 'content-length', 'accept-encoding']}
+        upstream_headers = {k: v for k, v in self.headers.items() if k.lower() not in ['host', 'content-length', 'accept-encoding', 'user-agent']}
         upstream_headers['Host'] = 'opencode.ai'
         upstream_headers['Accept-Encoding'] = 'identity'
         upstream_headers['Content-Length'] = str(len(final_body))
+        upstream_headers['User-Agent'] = 'opencode/1.18.16'  # Мимикрируем официальный клиент OpenCode для доступа к бесплатным моделям
 
         url = f"https://opencode.ai{self.path}"
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), BoundHTTPSHandler)
@@ -1273,7 +1274,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("Expected a retried JSON request object")
             anonymized_retry_body["model"] = model_id
             retry_data = json.dumps(anonymized_retry_body).encode("utf-8")
-            retry_headers = dict(upstream_headers)
+            retry_headers = {k: v for k, v in upstream_headers.items() if k.lower() not in ['user-agent']}
+            retry_headers['User-Agent'] = 'opencode/1.18.16'
             retry_headers["Content-Length"] = str(len(retry_data))
             retry_request = urllib.request.Request(
                 url, data=retry_data, headers=retry_headers, method="POST"

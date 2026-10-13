@@ -11,6 +11,9 @@ allow_list:
   - JetBrains
   - Gradle
   - EspoCRM
+  - URL
+  - ORGANIZATION
+  - INTERNAL_HOST
 
 # Кастомные детекторы — только критичные для безопасности.
 # Остальное (EMAIL, PHONE, PERSON, CREDIT_CARD, IBAN, SSN, URL, IP_ADDRESS)

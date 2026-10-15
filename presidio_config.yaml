@@ -11,9 +11,66 @@ allow_list:
   - JetBrains
   - Gradle
   - EspoCRM
+  - espocrm
   - URL
   - ORGANIZATION
   - INTERNAL_HOST
+  # Technical commands and common parameters
+  - cache
+  - clear_cache
+  - php
+  - php8.2
+  - php8.1
+  - php8.0
+  - php7.4
+  - index.php
+  - tail
+  - grep
+  - cat
+  - ls
+  - cd
+  - mkdir
+  - rm
+  - cp
+  - mv
+  - chmod
+  - chown
+  - wget
+  - curl
+  - apt
+  - apt-get
+  - yum
+  - dnf
+  - pip
+  - npm
+  - yarn
+  - composer
+  - docker
+  - docker-compose
+  - systemctl
+  - service
+  - journalctl
+  - nginx
+  - apache
+  - apache2
+  - httpd
+  - mysql
+  - mariadb
+  - postgres
+  - postgresql
+  - redis
+  - var
+  - www
+  - html
+  - public
+  - src
+  - vendor
+  - node_modules
+  - log
+  - logs
+  - tmp
+  - temp
+  - cache
 
 # Кастомные детекторы — только критичные для безопасности.
 # Остальное (EMAIL, PHONE, PERSON, CREDIT_CARD, IBAN, SSN, URL, IP_ADDRESS)

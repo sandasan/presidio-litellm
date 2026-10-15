@@ -45,7 +45,14 @@ if recognizer_config:
     print(f"Loaded custom recognizers from {recognizer_config}", flush=True)
 anonymizer = AnonymizerEngine()
 web_url_pattern = re.compile(r"(?i)\bhttps?://[^\s<>\"']+")
+file_path_pattern = re.compile(r"(?i)(?:/[\w\-./]+|[\w\-./]+\.(?:php|js|css|html|py|sh|json|yaml|yml|xml|txt|log))")
 url_host_entities = {"URL", "IP_ADDRESS", "INTERNAL_IP", "INTERNAL_HOST"}
+# Common technical terms and paths that should not be detected as PII
+technical_terms_exclusions = {
+    "espocrm", "cache", "clear_cache", "php", "index.php",
+    "/var/www/espocrm", "/var/www/espocrm/index.php",
+    "www", "var", "espocrm", "index.php"
+}
 # --------------------------------------------------
 
 class SanitizeRequest(BaseModel):
@@ -68,6 +75,26 @@ def analyze_text(text: str, language: str, entities: list[str] | None = None):
         entities=entities,
         allow_list=analyzer_allow_list or None,
     )
+    # Filter out results that match technical terms or are part of technical paths
+    filtered_results = []
+    for result in results:
+        detected_text = text[result.start:result.end].lower()
+        # Direct match in exclusions
+        if detected_text in technical_terms_exclusions:
+            continue
+        # Check if detected text is part of any technical term
+        is_part_of_technical = any(
+            detected_text in term or term in detected_text
+            for term in technical_terms_exclusions
+        )
+        if is_part_of_technical:
+            continue
+        # Check if it's part of a file path (e.g., /var/www/espocrm/index.php)
+        if file_path_pattern.search(text[max(0, result.start-20):result.end+10]):
+            continue
+        filtered_results.append(result)
+    results = filtered_results
+
     url_spans = [match.span() for match in web_url_pattern.finditer(text)]
     other_entity_spans = [
         (result.start, result.end)

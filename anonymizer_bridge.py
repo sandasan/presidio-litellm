@@ -579,8 +579,49 @@ class TextReference:
         self.index = index
 
 
+def fix_json_escapes(json_str):
+    """
+    Fix invalid JSON escape sequences in a string.
+    Converts invalid escapes like \M to \\M to make the string valid JSON.
+    """
+    if not isinstance(json_str, str):
+        return json_str
+
+    # Try to parse the JSON - if it succeeds, return as-is
+    try:
+        json.loads(json_str)
+        return json_str
+    except json.JSONDecodeError:
+        pass
+
+    # Fix invalid escape sequences
+    # Valid JSON escapes: \" \\ \/ \b \f \n \r \t \uXXXX
+    # Any other \X sequence should become \\X
+    result = []
+    i = 0
+    while i < len(json_str):
+        if json_str[i] == '\\' and i + 1 < len(json_str):
+            next_char = json_str[i + 1]
+            # Check if this is a valid JSON escape
+            if next_char in ('"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'):
+                result.append(json_str[i])
+                i += 1
+            else:
+                # Invalid escape - double the backslash
+                result.append('\\\\')
+                i += 1
+        else:
+            result.append(json_str[i])
+            i += 1
+
+    fixed = ''.join(result)
+    return fixed
+
+
 def anonymize_value(value, replacements, mapping_store, session_id):
     texts = []
+    # Track which TextReference indices correspond to tool_call arguments
+    tool_arg_indices = set()
 
     def collect(node):
         if isinstance(node, str):
@@ -597,6 +638,18 @@ def anonymize_value(value, replacements, mapping_store, session_id):
                 raise ValueError("Multimodal payload is not supported by the anonymizer")
             if any(key.lower() in media_keys and item for key, item in node.items()):
                 raise ValueError("Multimodal payload is not supported by the anonymizer")
+            # Mark tool_call arguments for special handling
+            if "function" in node and isinstance(node["function"], dict):
+                func = node["function"]
+                if "arguments" in func and isinstance(func["arguments"], str):
+                    index = len(texts)
+                    texts.append(func["arguments"])
+                    tool_arg_indices.add(index)
+                    # Replace with reference, will restore in rebuild
+                    node_copy = {k: v for k, v in node.items()}
+                    node_copy["function"] = {k: v for k, v in func.items()}
+                    node_copy["function"]["arguments"] = TextReference(index)
+                    return node_copy
             return {
                 collect(key): collect(item)
                 for key, item in node.items()
@@ -608,26 +661,17 @@ def anonymize_value(value, replacements, mapping_store, session_id):
         texts, replacements, mapping_store, session_id
     )
 
+    # Apply fix_json_escapes to tool_call arguments after anonymization
+    for i in tool_arg_indices:
+        if i < len(anonymized_texts):
+            anonymized_texts[i] = fix_json_escapes(anonymized_texts[i])
+
     def rebuild(node):
         if isinstance(node, TextReference):
             return anonymized_texts[node.index]
         if isinstance(node, list):
             return [rebuild(item) for item in node]
         if isinstance(node, dict):
-            # Special handling for tool_call function.arguments - it's a JSON string
-            if "function" in node and isinstance(node["function"], dict):
-                func = node["function"]
-                if "arguments" in func and isinstance(func["arguments"], str):
-                    try:
-                        # Parse the JSON arguments
-                        args_dict = json.loads(func["arguments"])
-                        # Recursively anonymize the parsed dict
-                        anonymized_args = anonymize_value(args_dict, replacements, mapping_store, session_id)
-                        # Re-serialize back to JSON string
-                        func["arguments"] = json.dumps(anonymized_args, ensure_ascii=False)
-                    except (json.JSONDecodeError, TypeError):
-                        # If parsing fails, leave as-is (will be handled by text anonymization)
-                        pass
             return {rebuild(key): rebuild(item) for key, item in node.items()}
         return node
 
@@ -982,22 +1026,18 @@ def restore_json_value(value, replacements):
         return [restore_json_value(item, replacements) for item in value]
     if isinstance(value, dict):
         # Special handling for tool_call function.arguments - it's a JSON string
+        # DO NOT parse and re-serialize to avoid double-escaping issues with backslashes
+        # Instead, do simple string replacement of placeholders
         if "function" in value and isinstance(value["function"], dict):
             func = value["function"]
             if "arguments" in func and isinstance(func["arguments"], str):
-                try:
-                    # Parse the JSON arguments
-                    args_dict = json.loads(func["arguments"])
-                    # Recursively restore placeholders in the parsed dict
-                    restored_args = restore_json_value(args_dict, replacements)
-                    # Re-serialize back to JSON string
-                    func["arguments"] = json.dumps(restored_args, ensure_ascii=False)
-                except (json.JSONDecodeError, TypeError):
-                    # If parsing fails, just do string replacement (best effort)
-                    func["arguments"] = PLACEHOLDER_PATTERN.sub(
-                        lambda match: replacements.get(canonical_placeholder(match.group(0)), "[sanitized_data]"),
-                        func["arguments"]
-                    )
+                # String-based placeholder replacement to avoid JSON serialization issues
+                func["arguments"] = PLACEHOLDER_PATTERN.sub(
+                    lambda match: replacements.get(canonical_placeholder(match.group(0)), "[sanitized_data]"),
+                    func["arguments"]
+                )
+                # Apply fix_json_escapes to ensure valid JSON after restoration
+                func["arguments"] = fix_json_escapes(func["arguments"])
         return {
             restore_json_value(key, replacements): restore_json_value(item, replacements)
             for key, item in value.items()
